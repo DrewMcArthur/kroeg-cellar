@@ -1,0 +1,11 @@
+[package]
+name = "kroeg-cellar"
+version = "0.1.0"
+authors = ["Puck Meerburg <puck@puckipedia.com>"]
+
+[dependencies]
+diesel = { version = "~1.2", features = ["postgres"] }
+jsonld = { path = "../jsonld-rs" }
+dotenv = "0.9.0"
+serde = "1.0"
+serde_json = "1.0"
