@@ -2,8 +2,8 @@
 extern crate diesel;
 extern crate jsonld;
 
-pub mod models;
-pub mod schema;
+mod models;
+mod schema;
 
 use diesel::dsl::any;
 use diesel::pg::upsert::excluded;
