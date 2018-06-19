@@ -3,7 +3,6 @@ use super::QuadClient;
 use diesel::prelude::*;
 use diesel::result::Error;
 use diesel::{delete, insert_into};
-use diesel::{sql_query, RunQueryDsl};
 
 use futures::future;
 use futures::prelude::*;
