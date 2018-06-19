@@ -6,6 +6,14 @@ table! {
 }
 
 table! {
+    collection_item (id) {
+        id -> Int4,
+        collection_id -> Int4,
+        object_id -> Int4,
+    }
+}
+
+table! {
     quad (id) {
         id -> Int4,
         quad_id -> Int4,
@@ -14,8 +22,8 @@ table! {
         attribute_id -> Nullable<Int4>,
         object -> Nullable<Text>,
         type_id -> Nullable<Int4>,
-        language -> Nullable<Text>,
+        language -> Nullable<Bpchar>,
     }
 }
 
-allow_tables_to_appear_in_same_query!(attribute, quad,);
+allow_tables_to_appear_in_same_query!(attribute, collection_item, quad,);

@@ -39,3 +39,18 @@ pub struct InsertableQuad {
     pub type_id: Option<i32>,
     pub language: Option<String>,
 }
+
+#[derive(Queryable, Debug)]
+pub struct CollectionItem {
+    pub id: i32,
+
+    pub collection_id: i32,
+    pub object_id: i32,
+}
+
+#[derive(Insertable, Debug)]
+#[table_name = "collection_item"]
+pub struct InsertableCollectionItem {
+    pub collection_id: i32,
+    pub object_id: i32,
+}
