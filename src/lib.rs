@@ -267,7 +267,7 @@ impl QuadClient {
         assert!(self.in_transaction == true);
         self.in_transaction = false;
 
-        sql_query("commit").execute(&self.connection).unwrap();
+        sql_query("rollback").execute(&self.connection).unwrap();
     }
 }
 
