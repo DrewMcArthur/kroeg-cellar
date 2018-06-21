@@ -9,32 +9,9 @@ use futures::prelude::*;
 
 use std::collections::HashMap;
 
-use jsonld::rdf::{jsonld_to_rdf, rdf_to_jsonld, BlankNodeGenerator};
+use jsonld::rdf::{jsonld_to_rdf, rdf_to_jsonld};
+use jsonld::nodemap::DefaultNodeGenerator;
 use kroeg_tap::{CollectionPointer, EntityStore, StoreItem};
-
-struct NodeGenerator {
-    i: u32,
-    map: HashMap<String, String>,
-}
-
-impl BlankNodeGenerator for NodeGenerator {
-    fn generate_blank_node(&mut self, id: Option<&str>) -> String {
-        if let Some(id) = id {
-            if self.map.contains_key(id) {
-                self.map[id].to_owned()
-            } else {
-                let form = format!("_:b{}", self.i);
-                self.i += 1;
-                self.map.insert(id.to_owned(), form.to_owned());
-                form
-            }
-        } else {
-            let form = format!("_:b{}", self.i);
-            self.i += 1;
-            form
-        }
-    }
-}
 
 impl EntityStore for QuadClient {
     type Error = Error;
@@ -75,10 +52,7 @@ impl EntityStore for QuadClient {
 
         let rdf = match jsonld_to_rdf(
             jld,
-            &mut NodeGenerator {
-                map: HashMap::new(),
-                i: 0,
-            },
+            &mut DefaultNodeGenerator::new()
         ) {
             Ok(rdf) => rdf,
             Err(err) => panic!("welp {}", err),
