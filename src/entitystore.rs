@@ -9,8 +9,8 @@ use futures::prelude::*;
 
 use std::collections::HashMap;
 
-use jsonld::rdf::{jsonld_to_rdf, rdf_to_jsonld};
 use jsonld::nodemap::DefaultNodeGenerator;
+use jsonld::rdf::{jsonld_to_rdf, rdf_to_jsonld};
 use kroeg_tap::{CollectionPointer, EntityStore, StoreItem};
 
 impl EntityStore for QuadClient {
@@ -50,10 +50,7 @@ impl EntityStore for QuadClient {
 
         let jld = item.to_json();
 
-        let rdf = match jsonld_to_rdf(
-            jld,
-            &mut DefaultNodeGenerator::new()
-        ) {
+        let rdf = match jsonld_to_rdf(jld, &mut DefaultNodeGenerator::new()) {
             Ok(rdf) => rdf,
             Err(err) => panic!("welp {}", err),
         };
