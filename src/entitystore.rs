@@ -69,7 +69,7 @@ impl EntityStore for QuadClient {
         &self,
         path: String,
         count: Option<u32>,
-        _cursor: Option<String>,
+        cursor: Option<String>,
     ) -> Self::ReadCollectionFuture {
         let path_id = match self.get_attribute_id(&path) {
             Ok(ok) => ok,
@@ -80,24 +80,47 @@ impl EntityStore for QuadClient {
             items: Vec::new(),
             before: None,
             after: None,
+            count: None,
         };
+
+        // !!!! before and after are as in previous and next page respectively!!
+        let mut before = i32::min_value();
+        let mut after = i32::max_value();
+        if let Some(cursor) = cursor {
+            let spl: Vec<_> = cursor.split('-').collect();
+            if spl.len() == 2 {
+                if let Some(val) = spl[1].parse::<i32>().ok() {
+                    if spl[0] == "before" {
+                        before = val;
+                    } else if spl[0] == "after" {
+                        after = val;
+                    }
+                }
+            }
+        }
 
         use models::CollectionItem;
         use schema::collection_item::dsl::*;
+
+        let count = count.unwrap_or(20u32);
+
         let items: Vec<CollectionItem> = match collection_item
             .filter(collection_id.eq(path_id))
-            .order(id.asc())
-            .limit(count.unwrap_or(20u32) as i64)
+            .filter(id.lt(after).and(id.gt(before)))
+            .order(id.desc())
+            .limit(count as i64)
             .load(&self.connection)
         {
             Ok(ok) => ok,
             Err(err) => return future::err(err),
         };
+
+
         if items.len() > 0 {
-            let first_id = items[0].id;
-            let last_id = items.iter().last().unwrap().id;
-            result.before = Some(format!("before-{}", first_id));
-            result.after = Some(format!("after-{}", last_id));
+            result.before = Some(format!("before-{}", items[0].id));
+            if items.len() == count as usize {
+                result.after = Some(format!("after-{}", items[(count - 1) as usize].id));
+            }
         }
 
         let ids = items.into_iter().map(|f| f.object_id).collect();
@@ -117,6 +140,7 @@ impl EntityStore for QuadClient {
             items: Vec::new(),
             before: None,
             after: None,
+            count: None,
         })
     }
 
