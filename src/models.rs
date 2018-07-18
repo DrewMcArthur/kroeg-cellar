@@ -54,3 +54,17 @@ pub struct InsertableCollectionItem {
     pub collection_id: i32,
     pub object_id: i32,
 }
+
+#[derive(Queryable, Debug)]
+pub struct QueueItem {
+    pub id: i32,
+    pub event: String,
+    pub data: String,
+}
+
+#[derive(Insertable, Debug)]
+#[table_name = "queue_item"]
+pub struct InsertableQueueItem {
+    pub event: String,
+    pub data: String,
+}

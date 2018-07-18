@@ -1,0 +1,1 @@
+drop table queue_item;

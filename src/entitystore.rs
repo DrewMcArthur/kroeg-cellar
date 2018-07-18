@@ -11,12 +11,88 @@ use std::collections::HashMap;
 
 use jsonld::nodemap::DefaultNodeGenerator;
 use jsonld::rdf::{jsonld_to_rdf, rdf_to_jsonld};
-use kroeg_tap::{CollectionPointer, EntityStore, StoreItem};
+use kroeg_tap::{CollectionPointer, EntityStore, QueueItem, QueueStore, StoreItem};
+
+use super::models;
+
+impl QueueItem for models::QueueItem {
+    fn event(&self) -> &str {
+        &self.event
+    }
+
+    fn data(&self) -> &str {
+        &self.data
+    }
+}
+
+impl QueueStore for QuadClient {
+    type Item = models::QueueItem;
+    type Error = Error;
+    type GetItemFuture = Box<Future<Item = Option<Self::Item>, Error = Self::Error> + Send + Sync>;
+    type MarkFuture = Box<Future<Item = (), Error = Self::Error> + Send + Sync>;
+
+    fn get_item(&self) -> Self::GetItemFuture {
+        use models::QueueItem;
+        use schema::queue_item::dsl::*;
+
+        match queue_item
+            .order(id)
+            .limit(1)
+            .get_result::<QueueItem>(&self.connection)
+            .optional()
+        {
+            Ok(Some(val)) => {
+                match delete(queue_item.filter(id.eq(val.id))).execute(&self.connection) {
+                    Ok(_) => Box::new(future::ok(Some(val))),
+                    Err(e) => return Box::new(future::err(e)),
+                }
+            }
+            Ok(None) => Box::new(future::ok(None)),
+            Err(e) => Box::new(future::err(e)),
+        }
+    }
+
+    fn mark_success(&self, _item: models::QueueItem) -> Self::MarkFuture {
+        Box::new(future::ok(()))
+    }
+
+    fn mark_failure(&self, item: models::QueueItem) -> Self::MarkFuture {
+        use models::InsertableQueueItem;
+        use schema::queue_item::dsl::*;
+
+        match insert_into(queue_item)
+            .values(&InsertableQueueItem {
+                event: item.event,
+                data: item.data,
+            })
+            .execute(&self.connection)
+        {
+            Ok(_) => Box::new(future::ok(())),
+            Err(e) => Box::new(future::err(e)),
+        }
+    }
+
+    fn add(&self, event: String, data: String) -> Self::MarkFuture {
+        use models::InsertableQueueItem;
+        use schema::queue_item::dsl::queue_item;
+
+        match insert_into(queue_item)
+            .values(&InsertableQueueItem {
+                event: event,
+                data: data,
+            })
+            .execute(&self.connection)
+        {
+            Ok(_) => Box::new(future::ok(())),
+            Err(e) => Box::new(future::err(e)),
+        }
+    }
+}
 
 impl EntityStore for QuadClient {
     type Error = Error;
-    type GetFuture = Box<Future<Item = Option<StoreItem>, Error = Self::Error> + Send>;
-    type StoreFuture = Box<Future<Item = StoreItem, Error = Self::Error> + Send>;
+    type GetFuture = Box<Future<Item = Option<StoreItem>, Error = Self::Error> + Send + Sync>;
+    type StoreFuture = Box<Future<Item = StoreItem, Error = Self::Error> + Send + Sync>;
 
     type ReadCollectionFuture = future::FutureResult<CollectionPointer, Self::Error>;
     type WriteCollectionFuture = future::FutureResult<(), Self::Error>;
@@ -114,7 +190,6 @@ impl EntityStore for QuadClient {
             Ok(ok) => ok,
             Err(err) => return future::err(err),
         };
-
 
         if items.len() > 0 {
             result.before = Some(format!("before-{}", items[0].id));
