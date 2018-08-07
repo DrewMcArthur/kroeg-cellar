@@ -64,8 +64,7 @@ impl QueueStore for QuadClient {
             .values(&InsertableQueueItem {
                 event: item.event,
                 data: item.data,
-            })
-            .execute(&self.connection)
+            }).execute(&self.connection)
         {
             Ok(_) => Box::new(future::ok(())),
             Err(e) => Box::new(future::err(e)),
@@ -80,8 +79,7 @@ impl QueueStore for QuadClient {
             .values(&InsertableQueueItem {
                 event: event,
                 data: data,
-            })
-            .execute(&self.connection)
+            }).execute(&self.connection)
         {
             Ok(_) => Box::new(future::ok(())),
             Err(e) => Box::new(future::err(e)),
@@ -237,8 +235,7 @@ impl EntityStore for QuadClient {
             .values(&InsertableCollectionItem {
                 collection_id: path_id,
                 object_id: item_id,
-            })
-            .execute(&self.connection)
+            }).execute(&self.connection)
             .map(|_| ())
             .into()
     }
