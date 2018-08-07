@@ -189,6 +189,14 @@ impl EntityStore for QuadClient {
             Err(err) => return future::err(err),
         };
 
+	if before != i32::min_value() {
+		result.after = Some(format!("after-{}", before));
+	}
+
+	if after != i32::max_value() {
+		result.before = Some(format!("before-{}", before));
+	}
+
         if items.len() > 0 {
             result.before = Some(format!("before-{}", items[0].id));
             if items.len() == count as usize {
