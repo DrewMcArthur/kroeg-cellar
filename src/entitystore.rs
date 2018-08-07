@@ -95,7 +95,7 @@ impl EntityStore for QuadClient {
     type ReadCollectionFuture = future::FutureResult<CollectionPointer, Self::Error>;
     type WriteCollectionFuture = future::FutureResult<(), Self::Error>;
 
-    fn get(&self, path: String) -> Self::GetFuture {
+    fn get(&self, path: String, _local: bool) -> Self::GetFuture {
         let cache = self.cache.borrow_mut();
         if cache.contains_key(&path) {
             Box::new(future::ok(cache[&path].clone()))
