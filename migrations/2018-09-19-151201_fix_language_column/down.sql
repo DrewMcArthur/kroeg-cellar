@@ -1,0 +1,2 @@
+-- Undoing the migration without unexpected data/compatibility loss is kinda impossible.
+-- but. I think it's safe to keep the migration. 
