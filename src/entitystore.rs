@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use jsonld::nodemap::DefaultNodeGenerator;
 use jsonld::rdf::{jsonld_to_rdf, rdf_to_jsonld};
 use kroeg_tap::{CollectionPointer, EntityStore, QueueItem, QueueStore, StoreItem};
+use serde_json::Value as JValue;
 
 use super::models;
 
@@ -110,8 +111,13 @@ impl EntityStore for QuadClient {
             } else {
                 let mut hash = HashMap::new();
                 hash.insert("@default".to_owned(), quads);
-                let jval = rdf_to_jsonld(hash, true, false);
-                Box::new(future::ok(Some(StoreItem::parse(&path, jval).unwrap())))
+                match rdf_to_jsonld(hash, true, false) {
+                    JValue::Object(jval) => {
+                        let jval = JValue::Array(jval.into_iter().map(|(_, b)| b).collect());
+                        Box::new(future::ok(Some(StoreItem::parse(&path, jval).unwrap())))
+                    }
+                    _ => unreachable!(),
+                }
             }
         }
     }
@@ -176,26 +182,36 @@ impl EntityStore for QuadClient {
         use models::CollectionItem;
         use schema::collection_item::dsl::*;
 
-        let count = count.unwrap_or(20u32);
+        let count = count.unwrap_or(50u32);
 
-        let items: Vec<CollectionItem> = match collection_item
-            .filter(collection_id.eq(path_id))
-            .filter(id.lt(after).and(id.gt(before)))
-            .order(id.desc())
-            .limit(count as i64)
-            .load(&self.connection)
-        {
+        let mut items: Vec<CollectionItem> = match if before == i32::min_value() {
+            collection_item
+                .filter(collection_id.eq(path_id))
+                .filter(id.lt(after).and(id.gt(before)))
+                .order(id.desc())
+                .limit(count as i64)
+                .load(&self.connection)
+        } else {
+            collection_item
+                .filter(collection_id.eq(path_id))
+                .filter(id.lt(after).and(id.gt(before)))
+                .order(id.asc())
+                .limit(count as i64)
+                .load(&self.connection)
+        } {
             Ok(ok) => ok,
             Err(err) => return future::err(err),
         };
 
-	if before != i32::min_value() {
-		result.after = Some(format!("after-{}", before));
-	}
+        items.sort_by_key(|f| -f.id);
 
-	if after != i32::max_value() {
-		result.before = Some(format!("before-{}", before));
-	}
+        if before != i32::min_value() {
+            result.after = Some(format!("after-{}", before));
+        }
+
+        if after != i32::max_value() {
+            result.before = Some(format!("before-{}", after));
+        }
 
         if items.len() > 0 {
             result.before = Some(format!("before-{}", items[0].id));

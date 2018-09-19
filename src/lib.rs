@@ -3,6 +3,7 @@ extern crate diesel;
 extern crate futures;
 extern crate jsonld;
 extern crate kroeg_tap;
+extern crate serde_json;
 
 mod entitystore;
 mod models;
