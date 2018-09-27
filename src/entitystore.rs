@@ -44,8 +44,8 @@ impl QueueStore for QuadClient {
         {
             Ok(Some(val)) => {
                 match delete(queue_item.filter(id.eq(val.id))).execute(&self.connection) {
-                    Ok(_) => Box::new(future::ok(Some(val))),
                     Ok(0) => Box::new(future::ok(None)),
+                    Ok(_) => Box::new(future::ok(Some(val))),
                     Err(e) => return Box::new(future::err(e)),
                 }
             }
