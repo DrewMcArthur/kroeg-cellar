@@ -1,17 +1,23 @@
 use super::QuadClient;
 
+use diesel::expression::dsl::sql;
+use diesel::pg::types::sql_types::Array;
 use diesel::prelude::*;
 use diesel::result::Error;
+use diesel::types::Integer;
 use diesel::{delete, insert_into};
 
 use futures::future;
 use futures::prelude::*;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use jsonld::nodemap::DefaultNodeGenerator;
 use jsonld::rdf::{jsonld_to_rdf, rdf_to_jsonld};
-use kroeg_tap::{CollectionPointer, EntityStore, QueueItem, QueueStore, StoreItem};
+use kroeg_tap::{
+    CollectionPointer, EntityStore, QuadQuery, QueryId, QueryObject, QueueItem, QueueStore,
+    StoreItem,
+};
 use serde_json::Value as JValue;
 
 use super::models;
@@ -93,6 +99,8 @@ impl EntityStore for QuadClient {
     type Error = Error;
     type GetFuture = Box<Future<Item = Option<StoreItem>, Error = Self::Error> + Send + Sync>;
     type StoreFuture = Box<Future<Item = StoreItem, Error = Self::Error> + Send + Sync>;
+
+    type QueryFuture = future::FutureResult<Vec<Vec<String>>, Self::Error>;
 
     type ReadCollectionFuture = future::FutureResult<CollectionPointer, Self::Error>;
     type WriteCollectionFuture = future::FutureResult<(), Self::Error>;
@@ -282,5 +290,138 @@ impl EntityStore for QuadClient {
             .execute(&self.connection)
             .map(|_| ())
             .into()
+    }
+
+    fn query(&self, data: Vec<QuadQuery>) -> Self::QueryFuture {
+        let mut placeholders = BTreeMap::new();
+        let mut checks = HashMap::new();
+        let mut others = Vec::new();
+        let quad_count = data.len();
+
+        for (i, QuadQuery(subject, predicate, object)) in data.into_iter().enumerate() {
+            match subject {
+                QueryId::Value(val) => {
+                    checks.insert(format!("quad_{}.quad_id", i), val);
+                }
+                QueryId::Placeholder(val) => if !placeholders.contains_key(&val) {
+                    placeholders.insert(val, vec![format!("quad_{}.quad_id", i)]);
+                } else {
+                    placeholders
+                        .get_mut(&val)
+                        .unwrap()
+                        .push(format!("quad_{}.quad_id", i));
+                },
+                QueryId::Ignore => {}
+            }
+            match predicate {
+                QueryId::Value(val) => {
+                    checks.insert(format!("quad_{}.predicate_id", i), val);
+                }
+                QueryId::Placeholder(val) => if !placeholders.contains_key(&val) {
+                    placeholders.insert(val, vec![format!("quad_{}.predicate_id", i)]);
+                } else {
+                    placeholders
+                        .get_mut(&val)
+                        .unwrap()
+                        .push(format!("quad_{}.predicate_id", i));
+                },
+                QueryId::Ignore => {}
+            }
+
+            match object {
+                QueryObject::Id(QueryId::Value(val)) => {
+                    checks.insert(format!("quad_{}.attribute_id", i), val);
+                }
+                QueryObject::Id(QueryId::Placeholder(val)) => if !placeholders.contains_key(&val) {
+                    placeholders.insert(val, vec![format!("quad_{}.attribute_id", i)]);
+                } else {
+                    placeholders
+                        .get_mut(&val)
+                        .unwrap()
+                        .push(format!("quad_{}.attribute_id", i));
+                },
+                QueryObject::Id(QueryId::Ignore) => {}
+                QueryObject::Object { value, type_id } => {
+                    others.push((format!("quad_{}.object", i), value));
+                    match type_id {
+                        QueryId::Value(val) => {
+                            checks.insert(format!("quad_{}.type_id", i), val);
+                        }
+                        QueryId::Placeholder(val) => if !placeholders.contains_key(&val) {
+                            placeholders.insert(val, vec![format!("quad_{}.type_id", i)]);
+                        } else {
+                            placeholders
+                                .get_mut(&val)
+                                .unwrap()
+                                .push(format!("quad_{}.type_id", i));
+                        },
+                        QueryId::Ignore => {}
+                    }
+                }
+                QueryObject::LanguageString { value, language } => {
+                    others.push((format!("quad_{}.object", i), value.to_owned()));
+                    others.push((format!("quad_{}.language", i), value));
+                }
+            }
+        }
+
+        let mut query = String::from("select array[");
+        for (i, (_, placeholder)) in placeholders.iter().enumerate() {
+            if i != 0 {
+                query += ", "
+            }
+
+            query += &placeholder[0];
+        }
+
+        query += "] from ";
+
+        for i in 0..quad_count {
+            if i != 0 {
+                query += ", ";
+            }
+
+            query += &format!("quad quad_{}", i);
+        }
+
+        query += " where true ";
+        for (a, b) in others {
+            query += &format!("and {} = '{}' ", a, b.replace("'", "''"));
+        }
+
+        for (_, placeholder) in placeholders {
+            for (a, b) in placeholder.iter().zip(placeholder.iter().skip(1)) {
+                query += &format!("and {} = {} ", a, b);
+            }
+        }
+
+        if let Err(e) = self.store_attributes(&checks.iter().map(|(_, b)| b as &str).collect()) {
+            return future::err(e);
+        }
+
+        {
+            let borrowed = self.attribute_id.borrow();
+            for (a, b) in checks {
+                let against = borrowed[&b];
+
+                query += &format!(" and {} = {}", a, against);
+            }
+        }
+
+        let mut data: Vec<Vec<i32>> = match sql::<Array<Integer>>(&query).load(&self.connection) {
+            Ok(data) => data,
+            Err(e) => return future::err(e),
+        };
+
+        if let Err(e) = self.get_attributes(&data.iter().flatten().map(|f| *f).collect()) {
+            return future::err(e);
+        }
+
+        let borrowed = self.attribute_url.borrow();
+        future::ok(
+            data.into_iter()
+                .map(|f| f.into_iter().map(|f| borrowed[&f].to_owned()).collect())
+                .collect(),
+        )
     }
 }
