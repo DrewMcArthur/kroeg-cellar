@@ -35,10 +35,10 @@ impl QueueItem for models::QueueItem {
 impl QueueStore for QuadClient {
     type Item = models::QueueItem;
     type Error = Error;
-    type GetItemFuture = Box<Future<Item = Option<Self::Item>, Error = Self::Error> + Send + Sync>;
-    type MarkFuture = Box<Future<Item = (), Error = Self::Error> + Send + Sync>;
+    type GetItemFuture = Box<Future<Item = (Option<Self::Item>, Self), Error = (Self::Error, Self)> + Send>;
+    type MarkFuture = Box<Future<Item = Self, Error = (Self::Error, Self)> + Send>;
 
-    fn get_item(&self) -> Self::GetItemFuture {
+    fn get_item(self) -> Self::GetItemFuture {
         use models::QueueItem;
         use schema::queue_item::dsl::*;
 
@@ -50,21 +50,21 @@ impl QueueStore for QuadClient {
         {
             Ok(Some(val)) => {
                 match delete(queue_item.filter(id.eq(val.id))).execute(&self.connection) {
-                    Ok(0) => Box::new(future::ok(None)),
-                    Ok(_) => Box::new(future::ok(Some(val))),
-                    Err(e) => return Box::new(future::err(e)),
+                    Ok(0) => Box::new(future::ok((None, self))),
+                    Ok(_) => Box::new(future::ok((Some(val), self))),
+                    Err(e) => return Box::new(future::err((e, self))),
                 }
             }
-            Ok(None) => Box::new(future::ok(None)),
-            Err(e) => Box::new(future::err(e)),
+            Ok(None) => Box::new(future::ok((None, self))),
+            Err(e) => Box::new(future::err((e, self))),
         }
     }
 
-    fn mark_success(&self, _item: models::QueueItem) -> Self::MarkFuture {
-        Box::new(future::ok(()))
+    fn mark_success(self, _item: models::QueueItem) -> Self::MarkFuture {
+        Box::new(future::ok(self))
     }
 
-    fn mark_failure(&self, item: models::QueueItem) -> Self::MarkFuture {
+    fn mark_failure(self, item: models::QueueItem) -> Self::MarkFuture {
         use models::InsertableQueueItem;
         use schema::queue_item::dsl::*;
 
@@ -74,12 +74,12 @@ impl QueueStore for QuadClient {
                 data: item.data,
             }).execute(&self.connection)
         {
-            Ok(_) => Box::new(future::ok(())),
-            Err(e) => Box::new(future::err(e)),
+            Ok(_) => Box::new(future::ok(self)),
+            Err(e) => Box::new(future::err((e, self))),
         }
     }
 
-    fn add(&self, event: String, data: String) -> Self::MarkFuture {
+    fn add(self, event: String, data: String) -> Self::MarkFuture {
         use models::InsertableQueueItem;
         use schema::queue_item::dsl::queue_item;
 
@@ -89,41 +89,40 @@ impl QueueStore for QuadClient {
                 data: data,
             }).execute(&self.connection)
         {
-            Ok(_) => Box::new(future::ok(())),
-            Err(e) => Box::new(future::err(e)),
+            Ok(_) => Box::new(future::ok(self)),
+            Err(e) => Box::new(future::err((e, self))),
         }
     }
 }
 
 impl EntityStore for QuadClient {
     type Error = Error;
-    type GetFuture = Box<Future<Item = Option<StoreItem>, Error = Self::Error> + Send + Sync>;
-    type StoreFuture = Box<Future<Item = StoreItem, Error = Self::Error> + Send + Sync>;
+    type GetFuture = Box<Future<Item = (Option<StoreItem>, Self), Error = (Self::Error, Self)> + Send>;
+    type StoreFuture = Box<Future<Item = (StoreItem, Self), Error = (Self::Error, Self)> + Send>;
 
-    type QueryFuture = future::FutureResult<Vec<Vec<String>>, Self::Error>;
+    type QueryFuture = future::FutureResult<(Vec<Vec<String>>, Self), (Self::Error, Self)>;
 
-    type ReadCollectionFuture = future::FutureResult<CollectionPointer, Self::Error>;
-    type WriteCollectionFuture = future::FutureResult<(), Self::Error>;
+    type ReadCollectionFuture = future::FutureResult<(CollectionPointer, Self), (Self::Error, Self)>;
+    type WriteCollectionFuture = future::FutureResult<Self, (Self::Error, Self)>;
 
-    fn get(&self, path: String, _local: bool) -> Self::GetFuture {
-        let cache = self.cache.borrow_mut();
-        if cache.contains_key(&path) {
-            Box::new(future::ok(cache[&path].clone()))
+    fn get(mut self, path: String, _local: bool) -> Self::GetFuture {
+        if self.cache.contains_key(&path) {
+            Box::new(future::ok((self.cache[&path].clone(), self)))
         } else {
             let quads = match self.read_quads(&path) {
                 Ok(quads) => quads,
-                Err(err) => return Box::new(future::err(err)),
+                Err(err) => return Box::new(future::err((err, self))),
             };
 
             if quads.len() == 0 {
-                Box::new(future::ok(None))
+                Box::new(future::ok((None, self)))
             } else {
                 let mut hash = HashMap::new();
                 hash.insert("@default".to_owned(), quads);
                 match rdf_to_jsonld(hash, true, false) {
                     JValue::Object(jval) => {
                         let jval = JValue::Array(jval.into_iter().map(|(_, b)| b).collect());
-                        Box::new(future::ok(Some(StoreItem::parse(&path, jval).unwrap())))
+                        Box::new(future::ok((Some(StoreItem::parse(&path, jval).unwrap()), self)))
                     }
                     _ => unreachable!(),
                 }
@@ -131,11 +130,8 @@ impl EntityStore for QuadClient {
         }
     }
 
-    fn put(&mut self, path: String, item: StoreItem) -> Self::StoreFuture {
-        {
-            let mut cache = self.cache.borrow_mut();
-            cache.remove(&path);
-        }
+    fn put(mut self, path: String, item: StoreItem) -> Self::StoreFuture {
+        self.cache.remove(&path);
 
         let jld = item.to_json();
 
@@ -146,23 +142,24 @@ impl EntityStore for QuadClient {
 
         let quads = rdf.clone().remove("@default").unwrap();
         if let Err(err) = self.write_quads(&path, quads) {
-            return Box::new(future::err(err));
+            return Box::new(future::err((err, self)));
         }
 
-        Box::new(future::ok(
+        Box::new(future::ok((
             StoreItem::parse(&path, rdf_to_jsonld(rdf, true, false)).unwrap(),
-        ))
+             self
+        )))
     }
 
     fn read_collection(
-        &self,
+        mut self,
         path: String,
         count: Option<u32>,
         cursor: Option<String>,
     ) -> Self::ReadCollectionFuture {
         let path_id = match self.get_attribute_id(&path) {
             Ok(ok) => ok,
-            Err(err) => return future::err(err),
+            Err(err) => return future::err((err, self)),
         };
 
         let mut result = CollectionPointer {
@@ -209,7 +206,7 @@ impl EntityStore for QuadClient {
                 .load(&self.connection)
         } {
             Ok(ok) => ok,
-            Err(err) => return future::err(err),
+            Err(err) => return future::err((err, self)),
         };
 
         items.sort_by_key(|f| -f.id);
@@ -232,67 +229,70 @@ impl EntityStore for QuadClient {
         let ids = items.into_iter().map(|f| f.object_id).collect();
         match self.get_attributes(&ids) {
             Ok(_) => (),
-            Err(err) => return future::err(err),
+            Err(err) => return future::err((err, self)),
         };
 
-        let attribute_url = self.attribute_url.borrow();
-        result.items = ids.into_iter().map(|f| attribute_url[&f].clone()).collect();
+        result.items = ids.into_iter().map(|f| self.attribute_url[&f].clone()).collect();
 
-        future::ok(result)
+        future::ok((result, self))
     }
 
-    fn find_collection(&self, _path: String, _item: String) -> Self::ReadCollectionFuture {
-        future::ok(CollectionPointer {
+    fn find_collection(self, _path: String, _item: String) -> Self::ReadCollectionFuture {
+        future::ok((CollectionPointer {
             items: Vec::new(),
             before: None,
             after: None,
             count: None,
-        })
+        }, self))
     }
 
-    fn insert_collection(&mut self, path: String, item: String) -> Self::WriteCollectionFuture {
+    fn insert_collection(mut self, path: String, item: String) -> Self::WriteCollectionFuture {
         use models::InsertableCollectionItem;
         use schema::collection_item::dsl::*;
 
         let path_id = match self.get_attribute_id(&path) {
             Ok(ok) => ok,
-            Err(err) => return future::err(err),
+            Err(err) => return future::err((err, self)),
         };
 
         let item_id = match self.get_attribute_id(&item) {
             Ok(ok) => ok,
-            Err(err) => return future::err(err),
+            Err(err) => return future::err((err, self)),
         };
 
-        insert_into(collection_item)
+        if let Err(err) = insert_into(collection_item)
             .values(&InsertableCollectionItem {
                 collection_id: path_id,
                 object_id: item_id,
-            }).execute(&self.connection)
-            .map(|_| ())
-            .into()
+            }).execute(&self.connection) {
+            future::err((err, self))
+        } else {
+            future::ok(self)
+        }
     }
 
-    fn remove_collection(&mut self, path: String, item: String) -> Self::WriteCollectionFuture {
+    fn remove_collection(mut self, path: String, item: String) -> Self::WriteCollectionFuture {
         use schema::collection_item::dsl::*;
 
         let path_id = match self.get_attribute_id(&path) {
             Ok(ok) => ok,
-            Err(err) => return future::err(err),
+            Err(err) => return future::err((err, self)),
         };
 
         let item_id = match self.get_attribute_id(&item) {
             Ok(ok) => ok,
-            Err(err) => return future::err(err),
+            Err(err) => return future::err((err, self)),
         };
 
-        delete(collection_item.filter(collection_id.eq(path_id).and(object_id.eq(item_id))))
-            .execute(&self.connection)
-            .map(|_| ())
-            .into()
+        if let Err(err) = delete(collection_item.filter(collection_id.eq(path_id).and(object_id.eq(item_id))))
+            .execute(&self.connection) {
+            future::err((err, self))
+        } else {
+            future::ok(self)
+        }
     }
 
-    fn query(&self, data: Vec<QuadQuery>) -> Self::QueryFuture {
+    fn query(mut self, data: Vec<QuadQuery>) -> Self::QueryFuture {
         let mut placeholders = BTreeMap::new();
         let mut checks = HashMap::new();
         let mut others = Vec::new();
@@ -396,32 +396,29 @@ impl EntityStore for QuadClient {
         }
 
         if let Err(e) = self.store_attributes(&checks.iter().map(|(_, b)| b as &str).collect()) {
-            return future::err(e);
+            return future::err((e, self));
         }
 
-        {
-            let borrowed = self.attribute_id.borrow();
-            for (a, b) in checks {
-                let against = borrowed[&b];
+        for (a, b) in checks {
+            let against = self.attribute_id[&b];
 
-                query += &format!(" and {} = {}", a, against);
-            }
+            query += &format!(" and {} = {}", a, against);
         }
 
         let mut data: Vec<Vec<i32>> = match sql::<Array<Integer>>(&query).load(&self.connection) {
             Ok(data) => data,
-            Err(e) => return future::err(e),
+            Err(e) => return future::err((e, self)),
         };
 
         if let Err(e) = self.get_attributes(&data.iter().flatten().map(|f| *f).collect()) {
-            return future::err(e);
+            return future::err((e, self));
         }
 
-        let borrowed = self.attribute_url.borrow();
-        future::ok(
+        future::ok((
             data.into_iter()
-                .map(|f| f.into_iter().map(|f| borrowed[&f].to_owned()).collect())
+                .map(|f| f.into_iter().map(|f| self.attribute_url[&f].to_owned()).collect())
                 .collect(),
-        )
+            self,
+        ))
     }
 }

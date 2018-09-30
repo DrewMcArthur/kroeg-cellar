@@ -16,16 +16,15 @@ use diesel::prelude::*;
 use diesel::sql_query;
 use jsonld::rdf::{QuadContents, StringQuad};
 use kroeg_tap::StoreItem;
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 /// A client that talks to a database to store triples keyed by quad.
 pub struct QuadClient {
     connection: PgConnection,
-    attribute_id: RefCell<HashMap<String, i32>>,
-    attribute_url: RefCell<HashMap<i32, String>>,
-    cache: RefCell<HashMap<String, Option<StoreItem>>>,
+    attribute_id: HashMap<String, i32>,
+    attribute_url: HashMap<i32, String>,
+    cache: HashMap<String, Option<StoreItem>>,
     in_transaction: bool,
 }
 
@@ -46,34 +45,30 @@ impl QuadClient {
     pub fn new(connection: PgConnection) -> QuadClient {
         QuadClient {
             connection: connection,
-            attribute_id: RefCell::new(HashMap::new()),
-            attribute_url: RefCell::new(HashMap::new()),
-            cache: RefCell::new(HashMap::new()),
+            attribute_id: HashMap::new(),
+            attribute_url: HashMap::new(),
+            cache: HashMap::new(),
             in_transaction: false,
         }
     }
 
     /// Takes a list of attributes and caches their contents into this client.
-    fn process_attributes(&self, vals: &Vec<models::Attribute>) {
-        let mut attribute_id = self.attribute_id.borrow_mut();
-        let mut attribute_url = self.attribute_url.borrow_mut();
-
+    fn process_attributes(&mut self, vals: &Vec<models::Attribute>) {
         for val in vals {
-            attribute_id.insert(val.url.to_owned(), val.id);
-            attribute_url.insert(val.id, val.url.to_owned());
+            self.attribute_id.insert(val.url.to_owned(), val.id);
+            self.attribute_url.insert(val.id, val.url.to_owned());
         }
     }
 
     /// Takes a `Vec` of IRIs, and stores them into the DB where needed,
     /// caching them.
-    fn store_attributes(&self, vals: &Vec<&str>) -> Result<(), diesel::result::Error> {
+    fn store_attributes(&mut self, vals: &Vec<&str>) -> Result<(), diesel::result::Error> {
         use models::NewAttribute;
         use schema::attribute::dsl::*;
 
         let to_write: Vec<_> = {
-            let attribute_id = self.attribute_id.borrow();
             vals.iter()
-                .filter(|f| !attribute_id.contains_key(**f))
+                .filter(|f| !self.attribute_id.contains_key(**f))
                 .map(|f| NewAttribute { url: f })
                 .collect()
         };
@@ -95,13 +90,12 @@ impl QuadClient {
     }
 
     /// Takes a `Vec` of database IDs and caches them into the local client.
-    fn get_attributes(&self, vals: &Vec<i32>) -> Result<(), diesel::result::Error> {
+    fn get_attributes(&mut self, vals: &Vec<i32>) -> Result<(), diesel::result::Error> {
         use schema::attribute::dsl::*;
 
         let to_read: Vec<_> = {
-            let attribute_url = self.attribute_url.borrow();
             vals.iter()
-                .filter(|f| !attribute_url.contains_key(f))
+                .filter(|f| !self.attribute_url.contains_key(f))
                 .collect()
         };
         if to_read.len() == 0 {
@@ -118,22 +112,22 @@ impl QuadClient {
     }
 
     /// Gets a single attribute IRI from a database ID.
-    pub fn get_attribute_url(&self, value: i32) -> Result<String, diesel::result::Error> {
+    pub fn get_attribute_url(&mut self, value: i32) -> Result<String, diesel::result::Error> {
         self.get_attributes(&vec![value])?;
 
-        Ok(self.attribute_url.borrow()[&value].to_owned())
+        Ok(self.attribute_url[&value].to_owned())
     }
 
     /// Gets a single database ID from an attribute IRI.
-    pub fn get_attribute_id(&self, value: &str) -> Result<i32, diesel::result::Error> {
+    pub fn get_attribute_id(&mut self, value: &str) -> Result<i32, diesel::result::Error> {
         self.store_attributes(&vec![value])?;
 
-        Ok(self.attribute_id.borrow()[value].to_owned())
+        Ok(self.attribute_id[value].to_owned())
     }
 
     /// Takes a `Vec<Quad>` and ensures that all the database IDs that are used
     /// will be cached.
-    fn preload_quads(&self, quads: &Vec<models::Quad>) -> Result<(), diesel::result::Error> {
+    fn preload_quads(&mut self, quads: &Vec<models::Quad>) -> Result<(), diesel::result::Error> {
         let mut required_ids = HashSet::new();
 
         for quad in quads {
@@ -153,13 +147,12 @@ impl QuadClient {
     }
 
     /// Translates a single DB Quad into a `StringQuad`
-    fn read_quad(&self, quad: &models::Quad) -> StringQuad {
-        let attribute_url = self.attribute_url.borrow();
+    fn read_quad(&mut self, quad: &models::Quad) -> StringQuad {
         let contents = if let Some(attribute_id) = quad.attribute_id {
-            QuadContents::Id(attribute_url[&attribute_id].to_owned())
+            QuadContents::Id(self.attribute_url[&attribute_id].to_owned())
         } else if let Some(type_id) = quad.type_id {
             QuadContents::Object(
-                attribute_url[&type_id].to_owned(),
+                self.attribute_url[&type_id].to_owned(),
                 quad.object.as_ref().unwrap().to_owned(),
                 quad.language.as_ref().map(|f| f.to_owned()),
             )
@@ -168,14 +161,14 @@ impl QuadClient {
         };
 
         StringQuad {
-            subject_id: attribute_url[&quad.subject_id].to_owned(),
-            predicate_id: attribute_url[&quad.predicate_id].to_owned(),
+            subject_id: self.attribute_url[&quad.subject_id].to_owned(),
+            predicate_id: self.attribute_url[&quad.predicate_id].to_owned(),
             contents: contents,
         }
     }
 
     /// Reads a list of triples from the database, using a graph ID as key.
-    pub fn read_quads(&self, quadid: &str) -> Result<Vec<StringQuad>, diesel::result::Error> {
+    pub fn read_quads(&mut self, quadid: &str) -> Result<Vec<StringQuad>, diesel::result::Error> {
         let quadid = self.get_attribute_id(quadid)?;
 
         use schema::quad::dsl::*;
@@ -187,7 +180,7 @@ impl QuadClient {
         Ok(quads.into_iter().map(|f| self.read_quad(&f)).collect())
     }
 
-    fn prestore_quads(&self, quads: &Vec<StringQuad>) -> Result<(), diesel::result::Error> {
+    fn prestore_quads(&mut self, quads: &Vec<StringQuad>) -> Result<(), diesel::result::Error> {
         let mut required_ids: HashSet<&str> = HashSet::new();
 
         for quad in quads {
@@ -202,20 +195,18 @@ impl QuadClient {
         self.store_attributes(&(required_ids.into_iter().collect()))
     }
 
-    fn write_quad(&self, quad_id: i32, quad: StringQuad) -> models::InsertableQuad {
-        let attribute_id = self.attribute_id.borrow();
-
+    fn write_quad(&mut self, quad_id: i32, quad: StringQuad) -> models::InsertableQuad {
         let (vattribute_id, type_id, object, lang) = match quad.contents {
-            QuadContents::Id(data) => (Some(attribute_id[&data]), None, None, None),
+            QuadContents::Id(data) => (Some(self.attribute_id[&data]), None, None, None),
             QuadContents::Object(data, object, lang) => {
-                (None, Some(attribute_id[&data]), Some(object), lang)
+                (None, Some(self.attribute_id[&data]), Some(object), lang)
             }
         };
 
         models::InsertableQuad {
             quad_id: quad_id,
-            subject_id: attribute_id[&quad.subject_id],
-            predicate_id: attribute_id[&quad.predicate_id],
+            subject_id: self.attribute_id[&quad.subject_id],
+            predicate_id: self.attribute_id[&quad.predicate_id],
             attribute_id: vattribute_id,
             type_id: type_id,
             object: object,
