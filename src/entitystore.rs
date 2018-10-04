@@ -237,13 +237,43 @@ impl EntityStore for QuadClient {
         future::ok((result, self))
     }
 
-    fn find_collection(self, _path: String, _item: String) -> Self::ReadCollectionFuture {
-        future::ok((CollectionPointer {
-            items: Vec::new(),
-            before: None,
-            after: None,
-            count: None,
-        }, self))
+    fn find_collection(mut self, path: String, item: String) -> Self::ReadCollectionFuture {
+        use models::CollectionItem;
+        use schema::collection_item::dsl::*;
+
+        let path_id = match self.get_attribute_id(&path) {
+            Ok(ok) => ok,
+            Err(err) => return future::err((err, self)),
+        };
+
+        let item_id = match self.get_attribute_id(&item) {
+            Ok(ok) => ok,
+            Err(err) => return future::err((err, self)),
+        };
+
+        let items = collection_item.filter(collection_id.eq(path_id).and(object_id.eq(item_id)))
+            .load(&self.connection);
+
+        let items: Vec<CollectionItem> = match items {
+            Ok(items) => items,
+            Err(e) => return future::err((e, self)),
+        };
+
+        if items.len() != 0 {
+            future::ok((CollectionPointer {
+                items: vec![item],
+                before: Some(format!("before-{}", items[0].id)),
+                after: Some(format!("after-{}", items[0].id)),
+                count: None,
+            }, self))
+        } else {
+            future::ok((CollectionPointer {
+                items: vec![],
+                before: None,
+                after: None,
+                count: None,
+            }, self))
+        }
     }
 
     fn insert_collection(mut self, path: String, item: String) -> Self::WriteCollectionFuture {
@@ -360,7 +390,7 @@ impl EntityStore for QuadClient {
                 }
                 QueryObject::LanguageString { value, language } => {
                     others.push((format!("quad_{}.object", i), value.to_owned()));
-                    others.push((format!("quad_{}.language", i), value));
+                    others.push((format!("quad_{}.language", i), language));
                 }
             }
         }
@@ -405,7 +435,7 @@ impl EntityStore for QuadClient {
             query += &format!(" and {} = {}", a, against);
         }
 
-        let mut data: Vec<Vec<i32>> = match sql::<Array<Integer>>(&query).load(&self.connection) {
+        let data: Vec<Vec<i32>> = match sql::<Array<Integer>>(&query).load(&self.connection) {
             Ok(data) => data,
             Err(e) => return future::err((e, self)),
         };
