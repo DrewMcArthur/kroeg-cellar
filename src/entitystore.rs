@@ -4,7 +4,7 @@ use diesel::expression::dsl::sql;
 use diesel::pg::types::sql_types::Array;
 use diesel::prelude::*;
 use diesel::result::Error;
-use diesel::types::Integer;
+use diesel::sql_types::Integer;
 use diesel::{delete, insert_into};
 
 use futures::future;
