@@ -248,6 +248,44 @@ impl EntityStore for QuadClient {
         future::ok((result, self))
     }
 
+    fn read_collection_inverse(mut self, item: String) -> Self::ReadCollectionFuture {
+        let item_id = match self.get_attribute_id(&item) {
+            Ok(ok) => ok,
+            Err(err) => return future::err((err, self)),
+        };
+
+        let mut result = CollectionPointer {
+            items: Vec::new(),
+            before: None,
+            after: None,
+            count: None,
+        };
+
+        use models::CollectionItem;
+        use schema::collection_item::dsl::*;
+
+        let items: Vec<CollectionItem> = match collection_item
+            .filter(object_id.eq(item_id))
+            .load(&self.connection)
+        {
+            Ok(ok) => ok,
+            Err(err) => return future::err((err, self)),
+        };
+
+        let ids = items.into_iter().map(|f| f.collection_id).collect();
+        match self.get_attributes(&ids) {
+            Ok(_) => (),
+            Err(err) => return future::err((err, self)),
+        };
+
+        result.items = ids
+            .into_iter()
+            .map(|f| self.attribute_url[&f].clone())
+            .collect();
+
+        future::ok((result, self))
+    }
+
     fn find_collection(mut self, path: String, item: String) -> Self::ReadCollectionFuture {
         use models::CollectionItem;
         use schema::collection_item::dsl::*;
@@ -349,6 +387,7 @@ impl EntityStore for QuadClient {
     fn query(mut self, data: Vec<QuadQuery>) -> Self::QueryFuture {
         let mut placeholders = BTreeMap::new();
         let mut checks = HashMap::new();
+        let mut checks_any = HashMap::new();
         let mut others = Vec::new();
         let quad_count = data.len();
 
@@ -367,6 +406,9 @@ impl EntityStore for QuadClient {
                             .push(format!("quad_{}.quad_id", i));
                     }
                 }
+                QueryId::Any(any) => {
+                    checks_any.insert(format!("quad_{}.quad_id", i), any);
+                }
                 QueryId::Ignore => {}
             }
             match predicate {
@@ -382,6 +424,9 @@ impl EntityStore for QuadClient {
                             .unwrap()
                             .push(format!("quad_{}.predicate_id", i));
                     }
+                }
+                QueryId::Any(any) => {
+                    checks_any.insert(format!("quad_{}.predicate_id", i), any);
                 }
                 QueryId::Ignore => {}
             }
@@ -400,6 +445,11 @@ impl EntityStore for QuadClient {
                             .push(format!("quad_{}.attribute_id", i));
                     }
                 }
+
+                QueryObject::Id(QueryId::Any(any)) => {
+                    checks_any.insert(format!("quad_{}.attribute_id", i), any);
+                }
+
                 QueryObject::Id(QueryId::Ignore) => {}
                 QueryObject::Object { value, type_id } => {
                     others.push((format!("quad_{}.object", i), value));
@@ -416,6 +466,9 @@ impl EntityStore for QuadClient {
                                     .unwrap()
                                     .push(format!("quad_{}.type_id", i));
                             }
+                        }
+                        QueryId::Any(any) => {
+                            checks_any.insert(format!("quad_{}.type_id", i), any);
                         }
                         QueryId::Ignore => {}
                     }
@@ -457,14 +510,33 @@ impl EntityStore for QuadClient {
             }
         }
 
-        if let Err(e) = self.store_attributes(&checks.iter().map(|(_, b)| b as &str).collect()) {
-            return future::err((e, self));
+        {
+            let checks_iter = checks.iter().map(|(_, b)| b as &str).chain(
+                checks_any
+                    .iter()
+                    .flat_map(|(_, b)| b.iter().map(|f| f as &str)),
+            );
+
+            if let Err(e) = self.store_attributes(&checks_iter.collect()) {
+                return future::err((e, self));
+            }
         }
 
         for (a, b) in checks {
             let against = self.attribute_id[&b];
 
             query += &format!(" and {} = {}", a, against);
+        }
+
+        for (a, b) in checks_any {
+            query += &format!(
+                " and {} in ({})",
+                a,
+                b.into_iter()
+                    .map(|f| self.attribute_id[&f].to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
 
         let data: Vec<Vec<i32>> = match sql::<Array<Integer>>(&query).load(&self.connection) {
