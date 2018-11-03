@@ -1,0 +1,1 @@
+alter table collection_item drop constraint collection_items_unique;

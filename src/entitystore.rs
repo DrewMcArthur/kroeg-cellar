@@ -35,7 +35,8 @@ impl QueueItem for models::QueueItem {
 impl QueueStore for QuadClient {
     type Item = models::QueueItem;
     type Error = Error;
-    type GetItemFuture = Box<Future<Item = (Option<Self::Item>, Self), Error = (Self::Error, Self)> + Send>;
+    type GetItemFuture =
+        Box<Future<Item = (Option<Self::Item>, Self), Error = (Self::Error, Self)> + Send>;
     type MarkFuture = Box<Future<Item = Self, Error = (Self::Error, Self)> + Send>;
 
     fn get_item(self) -> Self::GetItemFuture {
@@ -72,7 +73,8 @@ impl QueueStore for QuadClient {
             .values(&InsertableQueueItem {
                 event: item.event,
                 data: item.data,
-            }).execute(&self.connection)
+            })
+            .execute(&self.connection)
         {
             Ok(_) => Box::new(future::ok(self)),
             Err(e) => Box::new(future::err((e, self))),
@@ -87,7 +89,8 @@ impl QueueStore for QuadClient {
             .values(&InsertableQueueItem {
                 event: event,
                 data: data,
-            }).execute(&self.connection)
+            })
+            .execute(&self.connection)
         {
             Ok(_) => Box::new(future::ok(self)),
             Err(e) => Box::new(future::err((e, self))),
@@ -97,12 +100,14 @@ impl QueueStore for QuadClient {
 
 impl EntityStore for QuadClient {
     type Error = Error;
-    type GetFuture = Box<Future<Item = (Option<StoreItem>, Self), Error = (Self::Error, Self)> + Send>;
+    type GetFuture =
+        Box<Future<Item = (Option<StoreItem>, Self), Error = (Self::Error, Self)> + Send>;
     type StoreFuture = Box<Future<Item = (StoreItem, Self), Error = (Self::Error, Self)> + Send>;
 
     type QueryFuture = future::FutureResult<(Vec<Vec<String>>, Self), (Self::Error, Self)>;
 
-    type ReadCollectionFuture = future::FutureResult<(CollectionPointer, Self), (Self::Error, Self)>;
+    type ReadCollectionFuture =
+        future::FutureResult<(CollectionPointer, Self), (Self::Error, Self)>;
     type WriteCollectionFuture = future::FutureResult<Self, (Self::Error, Self)>;
 
     fn get(mut self, path: String, _local: bool) -> Self::GetFuture {
@@ -122,7 +127,10 @@ impl EntityStore for QuadClient {
                 match rdf_to_jsonld(hash, true, false) {
                     JValue::Object(jval) => {
                         let jval = JValue::Array(jval.into_iter().map(|(_, b)| b).collect());
-                        Box::new(future::ok((Some(StoreItem::parse(&path, jval).unwrap()), self)))
+                        Box::new(future::ok((
+                            Some(StoreItem::parse(&path, jval).unwrap()),
+                            self,
+                        )))
                     }
                     _ => unreachable!(),
                 }
@@ -147,7 +155,7 @@ impl EntityStore for QuadClient {
 
         Box::new(future::ok((
             StoreItem::parse(&path, rdf_to_jsonld(rdf, true, false)).unwrap(),
-             self
+            self,
         )))
     }
 
@@ -232,7 +240,10 @@ impl EntityStore for QuadClient {
             Err(err) => return future::err((err, self)),
         };
 
-        result.items = ids.into_iter().map(|f| self.attribute_url[&f].clone()).collect();
+        result.items = ids
+            .into_iter()
+            .map(|f| self.attribute_url[&f].clone())
+            .collect();
 
         future::ok((result, self))
     }
@@ -251,7 +262,8 @@ impl EntityStore for QuadClient {
             Err(err) => return future::err((err, self)),
         };
 
-        let items = collection_item.filter(collection_id.eq(path_id).and(object_id.eq(item_id)))
+        let items = collection_item
+            .filter(collection_id.eq(path_id).and(object_id.eq(item_id)))
             .load(&self.connection);
 
         let items: Vec<CollectionItem> = match items {
@@ -260,19 +272,25 @@ impl EntityStore for QuadClient {
         };
 
         if items.len() != 0 {
-            future::ok((CollectionPointer {
-                items: vec![item],
-                before: Some(format!("before-{}", items[0].id)),
-                after: Some(format!("after-{}", items[0].id)),
-                count: None,
-            }, self))
+            future::ok((
+                CollectionPointer {
+                    items: vec![item],
+                    before: Some(format!("before-{}", items[0].id)),
+                    after: Some(format!("after-{}", items[0].id)),
+                    count: None,
+                },
+                self,
+            ))
         } else {
-            future::ok((CollectionPointer {
-                items: vec![],
-                before: None,
-                after: None,
-                count: None,
-            }, self))
+            future::ok((
+                CollectionPointer {
+                    items: vec![],
+                    before: None,
+                    after: None,
+                    count: None,
+                },
+                self,
+            ))
         }
     }
 
@@ -294,7 +312,11 @@ impl EntityStore for QuadClient {
             .values(&InsertableCollectionItem {
                 collection_id: path_id,
                 object_id: item_id,
-            }).execute(&self.connection) {
+            })
+            .on_conflict((collection_id, object_id))
+            .do_nothing()
+            .execute(&self.connection)
+        {
             future::err((err, self))
         } else {
             future::ok(self)
@@ -314,8 +336,10 @@ impl EntityStore for QuadClient {
             Err(err) => return future::err((err, self)),
         };
 
-        if let Err(err) = delete(collection_item.filter(collection_id.eq(path_id).and(object_id.eq(item_id))))
-            .execute(&self.connection) {
+        if let Err(err) =
+            delete(collection_item.filter(collection_id.eq(path_id).and(object_id.eq(item_id))))
+                .execute(&self.connection)
+        {
             future::err((err, self))
         } else {
             future::ok(self)
@@ -333,28 +357,32 @@ impl EntityStore for QuadClient {
                 QueryId::Value(val) => {
                     checks.insert(format!("quad_{}.quad_id", i), val);
                 }
-                QueryId::Placeholder(val) => if !placeholders.contains_key(&val) {
-                    placeholders.insert(val, vec![format!("quad_{}.quad_id", i)]);
-                } else {
-                    placeholders
-                        .get_mut(&val)
-                        .unwrap()
-                        .push(format!("quad_{}.quad_id", i));
-                },
+                QueryId::Placeholder(val) => {
+                    if !placeholders.contains_key(&val) {
+                        placeholders.insert(val, vec![format!("quad_{}.quad_id", i)]);
+                    } else {
+                        placeholders
+                            .get_mut(&val)
+                            .unwrap()
+                            .push(format!("quad_{}.quad_id", i));
+                    }
+                }
                 QueryId::Ignore => {}
             }
             match predicate {
                 QueryId::Value(val) => {
                     checks.insert(format!("quad_{}.predicate_id", i), val);
                 }
-                QueryId::Placeholder(val) => if !placeholders.contains_key(&val) {
-                    placeholders.insert(val, vec![format!("quad_{}.predicate_id", i)]);
-                } else {
-                    placeholders
-                        .get_mut(&val)
-                        .unwrap()
-                        .push(format!("quad_{}.predicate_id", i));
-                },
+                QueryId::Placeholder(val) => {
+                    if !placeholders.contains_key(&val) {
+                        placeholders.insert(val, vec![format!("quad_{}.predicate_id", i)]);
+                    } else {
+                        placeholders
+                            .get_mut(&val)
+                            .unwrap()
+                            .push(format!("quad_{}.predicate_id", i));
+                    }
+                }
                 QueryId::Ignore => {}
             }
 
@@ -362,14 +390,16 @@ impl EntityStore for QuadClient {
                 QueryObject::Id(QueryId::Value(val)) => {
                     checks.insert(format!("quad_{}.attribute_id", i), val);
                 }
-                QueryObject::Id(QueryId::Placeholder(val)) => if !placeholders.contains_key(&val) {
-                    placeholders.insert(val, vec![format!("quad_{}.attribute_id", i)]);
-                } else {
-                    placeholders
-                        .get_mut(&val)
-                        .unwrap()
-                        .push(format!("quad_{}.attribute_id", i));
-                },
+                QueryObject::Id(QueryId::Placeholder(val)) => {
+                    if !placeholders.contains_key(&val) {
+                        placeholders.insert(val, vec![format!("quad_{}.attribute_id", i)]);
+                    } else {
+                        placeholders
+                            .get_mut(&val)
+                            .unwrap()
+                            .push(format!("quad_{}.attribute_id", i));
+                    }
+                }
                 QueryObject::Id(QueryId::Ignore) => {}
                 QueryObject::Object { value, type_id } => {
                     others.push((format!("quad_{}.object", i), value));
@@ -377,14 +407,16 @@ impl EntityStore for QuadClient {
                         QueryId::Value(val) => {
                             checks.insert(format!("quad_{}.type_id", i), val);
                         }
-                        QueryId::Placeholder(val) => if !placeholders.contains_key(&val) {
-                            placeholders.insert(val, vec![format!("quad_{}.type_id", i)]);
-                        } else {
-                            placeholders
-                                .get_mut(&val)
-                                .unwrap()
-                                .push(format!("quad_{}.type_id", i));
-                        },
+                        QueryId::Placeholder(val) => {
+                            if !placeholders.contains_key(&val) {
+                                placeholders.insert(val, vec![format!("quad_{}.type_id", i)]);
+                            } else {
+                                placeholders
+                                    .get_mut(&val)
+                                    .unwrap()
+                                    .push(format!("quad_{}.type_id", i));
+                            }
+                        }
                         QueryId::Ignore => {}
                     }
                 }
@@ -446,7 +478,11 @@ impl EntityStore for QuadClient {
 
         future::ok((
             data.into_iter()
-                .map(|f| f.into_iter().map(|f| self.attribute_url[&f].to_owned()).collect())
+                .map(|f| {
+                    f.into_iter()
+                        .map(|f| self.attribute_url[&f].to_owned())
+                        .collect()
+                })
                 .collect(),
             self,
         ))

@@ -76,10 +76,15 @@ fn set(mut client: QuadClient, id: &str) -> Result<QuadClient, (Error, QuadClien
     }
 }
 
-fn collection_insert(client: QuadClient, id: &str, object: &str) -> Result<QuadClient, (Error, QuadClient)> {
+fn collection_insert(
+    client: QuadClient,
+    id: &str,
+    object: &str,
+) -> Result<QuadClient, (Error, QuadClient)> {
     if let futures::Async::Ready(data) = client
         .insert_collection(id.to_owned(), object.to_owned())
-        .poll()? {
+        .poll()?
+    {
         Ok(data)
     } else {
         unreachable!();
@@ -101,10 +106,15 @@ fn collection_list(client: QuadClient, id: &str) -> Result<QuadClient, (Error, Q
     unreachable!();
 }
 
-fn collection_remove(client: QuadClient, id: &str, object: &str) -> Result<QuadClient, (Error, QuadClient)> {
+fn collection_remove(
+    client: QuadClient,
+    id: &str,
+    object: &str,
+) -> Result<QuadClient, (Error, QuadClient)> {
     if let futures::Async::Ready(data) = client
         .remove_collection(id.to_owned(), object.to_owned())
-        .poll()? {
+        .poll()?
+    {
         Ok(data)
     } else {
         unreachable!();
@@ -138,5 +148,6 @@ fn main() -> Result<(), (Error, QuadClient)> {
             collection_remove(client, collection, object)
         }
         _ => return help(&args[0]),
-    }.map(|_| ())
+    }
+    .map(|_| ())
 }
