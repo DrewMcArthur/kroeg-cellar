@@ -113,6 +113,37 @@ impl QuadClient {
         Ok(())
     }
 
+    /// Loads ALL the attributes into memory.
+    pub fn preload_all(&mut self) -> Result<usize, diesel::result::Error> {
+        use schema::attribute::dsl::*;
+
+        let attribute_results = attribute.load(&self.connection)?;
+
+        self.process_attributes(&attribute_results);
+
+        Ok(self.attribute_id.len())
+    }
+
+    /// Function that returns a bunch of unique quad IDs. WILL PANIC if you do not preload all first.
+    pub fn get_quads(&mut self, after: u32) -> Result<(Vec<String>, u32), diesel::result::Error> {
+        use diesel::expression::dsl::sql;
+        use diesel::sql_types::Integer;
+
+        let ids: Vec<i32> = sql::<Integer>(&format!("select distinct on (quad_id) quad_id from quad where quad_id > {} order by quad_id limit 3000", after)).load(&self.connection)?;
+        let last_id = ids
+            .iter()
+            .last()
+            .map(|a| *a as u32)
+            .unwrap_or(u32::max_value());
+
+        Ok((
+            ids.into_iter()
+                .map(|a| self.attribute_url[&a].to_owned())
+                .collect(),
+            last_id,
+        ))
+    }
+
     /// Gets a single attribute IRI from a database ID.
     pub fn get_attribute_url(&mut self, value: i32) -> Result<String, diesel::result::Error> {
         self.get_attributes(&vec![value])?;

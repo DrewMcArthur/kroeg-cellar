@@ -531,7 +531,7 @@ impl EntityStore for QuadClient {
             if b.len() == 0 {
                 return future::ok((vec![], self));
             }
-            
+
             query += &format!(
                 " and {} in ({})",
                 a,

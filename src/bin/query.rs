@@ -18,6 +18,7 @@ use serde_json::{from_reader, Value};
 use std::collections::HashMap;
 use std::env;
 use std::io::stdin;
+use std::io::{self, BufRead};
 
 fn help(val: &str) -> Result<(), (Error, QuadClient)> {
     eprintln!(
@@ -67,6 +68,10 @@ fn get(mut client: QuadClient, id: &str) -> Result<QuadClient, (Error, QuadClien
 }
 
 fn migrate(mut client: QuadClient, id: &str) -> Result<QuadClient, (Error, QuadClient)> {
+    if id == "all" {
+        return migrate_all(client);
+    }
+
     let quads = match client.read_quads(id) {
         Ok(ok) => ok,
         Err(e) => return Err((e, client)),
@@ -112,6 +117,44 @@ fn migrate(mut client: QuadClient, id: &str) -> Result<QuadClient, (Error, QuadC
     }
 
     Ok(client)
+}
+
+fn migrate_all(mut client: QuadClient) -> Result<QuadClient, (Error, QuadClient)> {
+    match client.preload_all() {
+        Ok(items) => println!("LOADED {} ATTRIBUTE IDS", items),
+        Err(e) => return Err((e, client)),
+    }
+
+    println!("Will update *ALL* quads. ARE YOU SURE??? Press enter to continue.");
+
+    let mut line = String::new();
+    let stdin = io::stdin();
+    let _ = stdin.lock().read_line(&mut line).unwrap();
+
+    let mut previous_id = 0;
+    let mut i = 0;
+
+    client.begin_transaction();
+    loop {
+        let (items, id) = match client.get_quads(previous_id) {
+            Ok(val) => val,
+            Err(e) => return Err((e, client)),
+        };
+
+        if items.len() == 0 {
+            println!("Done! Processed {} items", i);
+            client.commit_transaction();
+            return Ok(client);
+        }
+
+        for item in items {
+            i += 1;
+            println!("Item {}: {}", i, item);
+            client = migrate(client, &item)?;
+        }
+
+        previous_id = id;
+    }
 }
 
 fn set(mut client: QuadClient, id: &str) -> Result<QuadClient, (Error, QuadClient)> {
