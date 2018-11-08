@@ -12,11 +12,10 @@ use futures::prelude::*;
 
 use std::collections::{BTreeMap, HashMap};
 
-use jsonld::nodemap::DefaultNodeGenerator;
 use jsonld::rdf::{jsonld_to_rdf, rdf_to_jsonld};
 use kroeg_tap::{
     CollectionPointer, EntityStore, QuadQuery, QueryId, QueryObject, QueueItem, QueueStore,
-    StoreItem,
+    StoreItem, StoreItemNodeGenerator,
 };
 use serde_json::Value as JValue;
 
@@ -143,7 +142,7 @@ impl EntityStore for QuadClient {
 
         let jld = item.to_json();
 
-        let rdf = match jsonld_to_rdf(jld, &mut DefaultNodeGenerator::new()) {
+        let rdf = match jsonld_to_rdf(jld, &mut StoreItemNodeGenerator::new()) {
             Ok(rdf) => rdf,
             Err(err) => panic!("welp {}", err),
         };
