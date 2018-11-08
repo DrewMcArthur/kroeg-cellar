@@ -190,7 +190,11 @@ impl QuadClient {
                 quad.language.as_ref().map(|f| f.to_owned()),
             )
         } else {
-            unreachable!();
+            QuadContents::Object(
+                "http://www.w3.org/2001/XMLSchema#string".to_owned(),
+                quad.object.as_ref().unwrap().to_owned(),
+                quad.language.as_ref().map(|f| f.to_owned()),
+            )
         };
 
         StringQuad {
