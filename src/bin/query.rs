@@ -10,7 +10,7 @@ use diesel::{pg::PgConnection, Connection};
 use futures::Future;
 use jsonld::{
     nodemap::DefaultNodeGenerator,
-    rdf::{jsonld_to_rdf, rdf_to_jsonld},
+    rdf::{jsonld_to_rdf, rdf_to_jsonld, QuadContents},
 };
 use kroeg_cellar::QuadClient;
 use kroeg_tap::EntityStore;
@@ -20,19 +20,23 @@ use std::env;
 use std::io::stdin;
 
 fn help(val: &str) -> Result<(), (Error, QuadClient)> {
-    eprintln!("Usage: {} [database url] get/set [id]", val);
+    eprintln!(
+        "Retrieve single objects: {} [database url] (get|set) [id]",
+        val
+    );
     eprintln!(" - get returns a JSON-LD expanded object on stdout");
     eprintln!(" - set expects one on stdin");
     eprintln!(
-        "-- Collections: {} [database url] collection insert/remove <collection id> <id>",
+        "Write collections: {} [database url] collection insert/remove <collection id> <id>",
         val
     );
-    eprintln!("Insert/remove arbitrary IDs into arbitrary collections.");
     eprintln!(
-        "Also: {} [database url] collection list <collection id>",
+        "Read collections: {} [database url] collection list <collection id>",
         val
     );
-    eprintln!("Get all the IDs in a collection.");
+
+    eprintln!("[WARNING: DANGEROUS] {} [database url] migrate [id]", val);
+    eprintln!("  Migrates an object from quad to triple format.");
 
     Ok(())
 }
@@ -58,6 +62,54 @@ fn get(mut client: QuadClient, id: &str) -> Result<QuadClient, (Error, QuadClien
     };
 
     println!("{}", json.to_string());
+
+    Ok(client)
+}
+
+fn migrate(mut client: QuadClient, id: &str) -> Result<QuadClient, (Error, QuadClient)> {
+    let quads = match client.read_quads(id) {
+        Ok(ok) => ok,
+        Err(e) => return Err((e, client)),
+    };
+
+    let mut triples = HashMap::new();
+
+    for mut quad in quads {
+        if quad.subject_id.starts_with("_:") {
+            quad.subject_id = format!("_:{}{}", id, &quad.subject_id[1..]);
+        }
+
+        let id_val = if quad.subject_id == "https://puckipedia.com/kroeg/ns#meta" {
+            id.to_owned()
+        } else {
+            quad.subject_id.to_owned()
+        };
+
+        if !triples.contains_key(&id_val) {
+            triples.insert(id_val.to_owned(), Vec::new());
+        }
+
+        match quad.contents {
+            QuadContents::Id(ref mut val) => {
+                if val.starts_with("_:") {
+                    *val = format!("_:{}{}", id, &val[1..]);
+                }
+            }
+
+            _ => {}
+        }
+
+        triples.get_mut(&id_val).unwrap().push(quad);
+    }
+
+    for (k, v) in triples {
+        println!("Storing {}", k);
+
+        match client.write_quads(&k, v) {
+            Ok(_) => {}
+            Err(e) => return Err((e, client)),
+        }
+    }
 
     Ok(client)
 }
@@ -147,6 +199,7 @@ fn main() -> Result<(), (Error, QuadClient)> {
         ("collection", "remove", Some(collection), Some(object)) => {
             collection_remove(client, collection, object)
         }
+        ("migrate", id, None, None) => migrate(client, id),
         _ => return help(&args[0]),
     }
     .map(|_| ())
