@@ -8,12 +8,9 @@ extern crate serde_json;
 use diesel::result::Error;
 use diesel::{pg::PgConnection, Connection};
 use futures::Future;
-use jsonld::{
-    nodemap::DefaultNodeGenerator,
-    rdf::{jsonld_to_rdf, rdf_to_jsonld, QuadContents},
-};
+use jsonld::rdf::{jsonld_to_rdf, rdf_to_jsonld, QuadContents};
 use kroeg_cellar::QuadClient;
-use kroeg_tap::EntityStore;
+use kroeg_tap::{EntityStore, StoreItemNodeGenerator};
 use serde_json::{from_reader, Value};
 use std::collections::HashMap;
 use std::env;
@@ -80,7 +77,7 @@ fn migrate(mut client: QuadClient, id: &str) -> Result<QuadClient, (Error, QuadC
     let mut triples = HashMap::new();
 
     for mut quad in quads {
-        if quad.subject_id.starts_with("_:") {
+        if quad.subject_id.starts_with("_:b") {
             quad.subject_id = format!("_:{}{}", id, &quad.subject_id[1..]);
         }
 
@@ -96,7 +93,7 @@ fn migrate(mut client: QuadClient, id: &str) -> Result<QuadClient, (Error, QuadC
 
         match quad.contents {
             QuadContents::Id(ref mut val) => {
-                if val.starts_with("_:") {
+                if val.starts_with("_:b") {
                     *val = format!("_:{}{}", id, &val[1..]);
                 }
             }
@@ -159,7 +156,7 @@ fn migrate_all(mut client: QuadClient) -> Result<QuadClient, (Error, QuadClient)
 
 fn set(mut client: QuadClient, id: &str) -> Result<QuadClient, (Error, QuadClient)> {
     let json = from_reader(stdin()).unwrap();
-    let quads = jsonld_to_rdf(json, &mut DefaultNodeGenerator::new())
+    let quads = jsonld_to_rdf(json, &mut StoreItemNodeGenerator::new())
         .unwrap()
         .remove("@default")
         .unwrap();
