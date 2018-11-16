@@ -1,309 +1,200 @@
-#![allow(proc_macro_derive_resolution_fallback)]
-
-#[macro_use]
-extern crate diesel;
 extern crate futures;
+extern crate futures_state_stream;
 extern crate jsonld;
 extern crate kroeg_tap;
 extern crate serde_json;
+extern crate tokio_postgres;
 
-mod entitystore;
-mod models;
-mod schema;
+use futures::{future, stream, Future, Stream};
+use futures_state_stream::{StateStream, StreamEvent};
+use jsonld::rdf::StringQuad;
+use std::collections::HashSet;
+use tokio_postgres::{error::Error, Client, Connection, Row, Statement};
 
-use diesel::dsl::any;
-use diesel::pg::upsert::excluded;
-use diesel::pg::PgConnection;
-use diesel::prelude::*;
-use diesel::sql_query;
-use jsonld::rdf::{QuadContents, StringQuad};
-use kroeg_tap::StoreItem;
-use std::collections::{HashMap, HashSet};
-use std::fmt;
+mod statements;
+pub use statements::*;
 
-/// A client that talks to a database to store triples keyed by quad.
-pub struct QuadClient {
-    connection: PgConnection,
-    attribute_id: HashMap<String, i32>,
-    attribute_url: HashMap<i32, String>,
-    cache: HashMap<String, Option<StoreItem>>,
-    in_transaction: bool,
+mod cache;
+pub use cache::*;
+
+struct CellarEntityStore {
+    connection: Client,
+    statements: Statements,
+    cache: EntityCache,
 }
 
-impl fmt::Debug for QuadClient {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "QuadClient {{ [...] }}")
-    }
+pub enum DatabaseQuadContents {
+    Id(i32),
+    Object { contents: String, type_id: i32 },
+    LanguageString { contents: String, language: String },
 }
 
-impl QuadClient {
-    /// Gets a handle to the underlying connection.
-    pub fn connection(&self) -> &PgConnection {
-        &self.connection
-    }
+pub struct DatabaseQuad {
+    pub id: i32,
+    pub quad_id: i32,
+    pub subject_id: i32,
+    pub predicate_id: i32,
+    pub contents: DatabaseQuadContents,
+}
 
-    /// Creates a new `QuadClient` from a `PgConnnection`. Multiple clients
-    /// can exist safely on one DB without interfering.
-    pub fn new(connection: PgConnection) -> QuadClient {
-        QuadClient {
-            connection: connection,
-            attribute_id: HashMap::new(),
-            attribute_url: HashMap::new(),
-            cache: HashMap::new(),
-            in_transaction: false,
-        }
-    }
-
-    /// Takes a list of attributes and caches their contents into this client.
-    fn process_attributes(&mut self, vals: &Vec<models::Attribute>) {
-        for val in vals {
-            self.attribute_id.insert(val.url.to_owned(), val.id);
-            self.attribute_url.insert(val.id, val.url.to_owned());
-        }
-    }
-
-    /// Takes a `Vec` of IRIs, and stores them into the DB where needed,
-    /// caching them.
-    fn store_attributes(&mut self, vals: &Vec<&str>) -> Result<(), diesel::result::Error> {
-        use models::NewAttribute;
-        use schema::attribute::dsl::*;
-
-        let to_write: Vec<_> = {
-            vals.iter()
-                .filter(|f| !self.attribute_id.contains_key(**f))
-                .map(|f| NewAttribute { url: f })
-                .collect()
+impl From<&Row> for DatabaseQuad {
+    fn from(row: &Row) -> DatabaseQuad {
+        let contents = match (row.get(4), row.get(5), row.get(6), row.get(7)) {
+            (Some(id), _, _, _) => DatabaseQuadContents::Id(id),
+            (_, Some(contents), _, Some(language)) => DatabaseQuadContents::LanguageString {
+                contents: contents,
+                language: language,
+            },
+            (_, Some(contents), Some(type_id), _) => DatabaseQuadContents::Object {
+                contents: contents,
+                type_id: type_id,
+            },
+            _ => panic!("invalid quad contents; impossible"),
         };
 
-        if to_write.len() == 0 {
-            return Ok(());
-        }
-
-        let attribute_results = diesel::insert_into(attribute)
-            .values(&to_write)
-            .on_conflict(url)
-            .do_update()
-            .set(url.eq(excluded(url)))
-            .load(&self.connection)?;
-
-        self.process_attributes(&attribute_results);
-
-        Ok(())
-    }
-
-    /// Takes a `Vec` of database IDs and caches them into the local client.
-    fn get_attributes(&mut self, vals: &Vec<i32>) -> Result<(), diesel::result::Error> {
-        use schema::attribute::dsl::*;
-
-        let to_read: Vec<_> = {
-            vals.iter()
-                .filter(|f| !self.attribute_url.contains_key(f))
-                .collect()
-        };
-        if to_read.len() == 0 {
-            return Ok(());
-        }
-
-        let attribute_results = attribute
-            .filter(id.eq(any(to_read)))
-            .load(&self.connection)?;
-
-        self.process_attributes(&attribute_results);
-
-        Ok(())
-    }
-
-    /// Loads ALL the attributes into memory.
-    pub fn preload_all(&mut self) -> Result<usize, diesel::result::Error> {
-        use schema::attribute::dsl::*;
-
-        let attribute_results = attribute.load(&self.connection)?;
-
-        self.process_attributes(&attribute_results);
-
-        Ok(self.attribute_id.len())
-    }
-
-    /// Function that returns a bunch of unique quad IDs. WILL PANIC if you do not preload all first.
-    pub fn get_quads(&mut self, after: u32) -> Result<(Vec<String>, u32), diesel::result::Error> {
-        use diesel::expression::dsl::sql;
-        use diesel::sql_types::Integer;
-
-        let ids: Vec<i32> = sql::<Integer>(&format!("select distinct on (quad_id) quad_id from quad where quad_id > {} order by quad_id limit 3000", after)).load(&self.connection)?;
-        let last_id = ids
-            .iter()
-            .last()
-            .map(|a| *a as u32)
-            .unwrap_or(u32::max_value());
-
-        Ok((
-            ids.into_iter()
-                .map(|a| self.attribute_url[&a].to_owned())
-                .collect(),
-            last_id,
-        ))
-    }
-
-    /// Gets a single attribute IRI from a database ID.
-    pub fn get_attribute_url(&mut self, value: i32) -> Result<String, diesel::result::Error> {
-        self.get_attributes(&vec![value])?;
-
-        Ok(self.attribute_url[&value].to_owned())
-    }
-
-    /// Gets a single database ID from an attribute IRI.
-    pub fn get_attribute_id(&mut self, value: &str) -> Result<i32, diesel::result::Error> {
-        self.store_attributes(&vec![value])?;
-
-        Ok(self.attribute_id[value].to_owned())
-    }
-
-    /// Takes a `Vec<Quad>` and ensures that all the database IDs that are used
-    /// will be cached.
-    fn preload_quads(&mut self, quads: &Vec<models::Quad>) -> Result<(), diesel::result::Error> {
-        let mut required_ids = HashSet::new();
-
-        for quad in quads {
-            required_ids.insert(quad.subject_id);
-            required_ids.insert(quad.predicate_id);
-
-            if let Some(qval) = quad.attribute_id {
-                required_ids.insert(qval);
-            }
-
-            if let Some(qval) = quad.type_id {
-                required_ids.insert(qval);
-            }
-        }
-
-        self.get_attributes(&(required_ids.into_iter().collect()))
-    }
-
-    /// Translates a single DB Quad into a `StringQuad`
-    fn read_quad(&mut self, quad: &models::Quad) -> StringQuad {
-        let contents = if let Some(attribute_id) = quad.attribute_id {
-            QuadContents::Id(self.attribute_url[&attribute_id].to_owned())
-        } else if let Some(type_id) = quad.type_id {
-            QuadContents::Object(
-                self.attribute_url[&type_id].to_owned(),
-                quad.object.as_ref().unwrap().to_owned(),
-                quad.language.as_ref().map(|f| f.to_owned()),
-            )
-        } else {
-            QuadContents::Object(
-                "http://www.w3.org/2001/XMLSchema#string".to_owned(),
-                quad.object.as_ref().unwrap().to_owned(),
-                quad.language.as_ref().map(|f| f.to_owned()),
-            )
-        };
-
-        StringQuad {
-            subject_id: self.attribute_url[&quad.subject_id].to_owned(),
-            predicate_id: self.attribute_url[&quad.predicate_id].to_owned(),
+        DatabaseQuad {
+            id: row.get(0),
+            quad_id: row.get(1),
+            subject_id: row.get(2),
+            predicate_id: row.get(3),
             contents: contents,
         }
     }
+}
 
-    /// Reads a list of triples from the database, using a graph ID as key.
-    pub fn read_quads(&mut self, quadid: &str) -> Result<Vec<StringQuad>, diesel::result::Error> {
-        let quadid = self.get_attribute_id(quadid)?;
-
-        use schema::quad::dsl::*;
-
-        let quads: Vec<models::Quad> = quad.filter(quad_id.eq(quadid)).load(&self.connection)?;
-
-        self.preload_quads(&quads)?;
-
-        Ok(quads.into_iter().map(|f| self.read_quad(&f)).collect())
+impl CellarEntityStore {
+    /// Helper method to split up the entity store into its parts.
+    fn unwrap(self) -> (Client, Statements, EntityCache) {
+        (self.connection, self.statements, self.cache)
     }
 
-    fn prestore_quads(&mut self, quads: &Vec<StringQuad>) -> Result<(), diesel::result::Error> {
-        let mut required_ids: HashSet<&str> = HashSet::new();
+    /// Takes a StateStream of Rows and stores them into the cache.
+    fn cache_attribute_rows<T: Stream<Item = Row, Error = Error>>(
+        conn: Client,
+        cache: EntityCache,
+        statements: Statements,
+        stream: T,
+    ) -> impl Future<Item = CellarEntityStore, Error = (Error, CellarEntityStore)> {
+        stream.collect().then(move |future| {
+            let mut store = CellarEntityStore {
+                connection: conn,
+                statements: statements,
+                cache: cache,
+            };
+
+            match future {
+                Ok(rows) => {
+                    for row in rows {
+                        store.cache.cache_attribute_row(row);
+                    }
+
+                    future::ok(store)
+                }
+
+                Err(e) => future::err((e, store)),
+            }
+        })
+    }
+
+    /// Returns a list of quads built from a StateStream.
+    fn translate_quad_stream<T: Stream<Item = Row, Error = Error>>(
+        conn: Client,
+        cache: EntityCache,
+        statements: Statements,
+        stream: T,
+    ) -> impl Future<Item = (Vec<DatabaseQuad>, CellarEntityStore), Error = (Error, CellarEntityStore)>
+    {
+        stream.map(|f| (&f).into()).collect().then(move |future| {
+            let store = CellarEntityStore {
+                connection: conn,
+                statements: statements,
+                cache: cache,
+            };
+
+            match future {
+                Ok(items) => future::ok((items, store)),
+                Err(e) => future::err((e, store)),
+            }
+        })
+    }
+
+    /// Takes a slice of Strings, queries them into the database, then stores them into the cache
+    pub fn cache_uris(
+        self,
+        uris: &[String],
+    ) -> impl Future<Item = CellarEntityStore, Error = (Error, CellarEntityStore)> {
+        // XXX todo: 0 item optimization
+        let (mut connection, statements, cache) = self.unwrap();
+        let uncached: Vec<_> = uris
+            .iter()
+            .filter(|&f| !cache.uri_to_id.contains_key(f))
+            .collect();
+        let query = connection.query(&statements.upsert_attributes, &[&uncached]);
+
+        CellarEntityStore::cache_attribute_rows(connection, cache, statements, query)
+    }
+
+    /// Takes a slice of IDs, queries them from the database, and stores them into the cache.
+    pub fn cache_ids(
+        self,
+        ids: &[i32],
+    ) -> impl Future<Item = CellarEntityStore, Error = (Error, CellarEntityStore)> {
+        let (mut connection, statements, cache) = self.unwrap();
+        let uncached: Vec<_> = ids
+            .iter()
+            .filter(|f| !cache.id_to_uri.contains_key(f))
+            .collect();
+        let query = connection.query(&statements.select_attributes, &[&uncached]);
+
+        CellarEntityStore::cache_attribute_rows(connection, cache, statements, query)
+    }
+
+    /// Reads all the quads stored for a specific quad ID.
+    fn read_quad(
+        self,
+        id: i32,
+    ) -> impl Future<Item = (Vec<DatabaseQuad>, CellarEntityStore), Error = (Error, CellarEntityStore)>
+    {
+        let (mut connection, statements, cache) = self.unwrap();
+        let query = connection.query(&statements.select_quad, &[&id]);
+
+        CellarEntityStore::translate_quad_stream(connection, cache, statements, query)
+    }
+
+    /// Collects all IDs used inside the passed quads. Can be used to cache all the IDs.
+    fn collect_quad_ids(&self, quads: &[DatabaseQuad]) -> HashSet<i32> {
+        let mut out = HashSet::new();
 
         for quad in quads {
-            required_ids.insert(&quad.subject_id);
-            required_ids.insert(&quad.predicate_id);
+            out.insert(quad.quad_id);
+            out.insert(quad.subject_id);
+            out.insert(quad.predicate_id);
             match quad.contents {
-                QuadContents::Id(ref data) => required_ids.insert(&*data),
-                QuadContents::Object(ref data, _, _) => required_ids.insert(&*data),
+                DatabaseQuadContents::Id(id) => out.insert(id),
+                DatabaseQuadContents::Object { type_id: id, .. } => out.insert(id),
+                _ => false,
             };
         }
 
-        self.store_attributes(&(required_ids.into_iter().collect()))
+        out
     }
 
-    fn write_quad(&mut self, quad_id: i32, quad: StringQuad) -> models::InsertableQuad {
-        let (vattribute_id, type_id, object, lang) = match quad.contents {
-            QuadContents::Id(data) => (Some(self.attribute_id[&data]), None, None, None),
-            QuadContents::Object(data, object, lang) => {
-                (None, Some(self.attribute_id[&data]), Some(object), lang)
-            }
-        };
+    /// Translates the incoming quads into quads usable with the jsonld crate.
+    pub fn translate_quads(
+        self,
+        quads: Vec<DatabaseQuad>,
+    ) -> impl Future<Item = (Vec<StringQuad>, CellarEntityStore), Error = (Error, CellarEntityStore)>
+    {
+        let items: Vec<_> = self.collect_quad_ids(&quads).into_iter().collect();
 
-        models::InsertableQuad {
-            quad_id: quad_id,
-            subject_id: self.attribute_id[&quad.subject_id],
-            predicate_id: self.attribute_id[&quad.predicate_id],
-            attribute_id: vattribute_id,
-            type_id: type_id,
-            object: object,
-            language: lang,
-        }
-    }
-
-    /// Store a list of quads in the DB, keyed by graph ID.
-    pub fn write_quads(
-        &mut self,
-        quadid: &str,
-        items: Vec<StringQuad>,
-    ) -> Result<(), diesel::result::Error> {
-        self.prestore_quads(&items)?;
-
-        let quadid = self.get_attribute_id(quadid)?;
-
-        use schema::quad::dsl::*;
-
-        let items: Vec<_> = items
-            .into_iter()
-            .map(|f| self.write_quad(quadid, f))
-            .collect();
-
-        diesel::delete(quad.filter(quad_id.eq(quadid))).execute(&self.connection)?;
-        diesel::insert_into(quad)
-            .values(&items)
-            .execute(&self.connection)?;
-
-        Ok(())
-    }
-
-    pub fn begin_transaction(&mut self) {
-        assert!(self.in_transaction == false);
-        self.in_transaction = true;
-
-        sql_query("begin transaction")
-            .execute(&self.connection)
-            .unwrap();
-    }
-
-    pub fn commit_transaction(&mut self) {
-        assert!(self.in_transaction == true);
-        self.in_transaction = false;
-
-        sql_query("commit").execute(&self.connection).unwrap();
-    }
-
-    pub fn rollback_transaction(&mut self) {
-        assert!(self.in_transaction == true);
-        self.in_transaction = false;
-
-        sql_query("rollback").execute(&self.connection).unwrap();
-    }
-}
-
-impl Drop for QuadClient {
-    fn drop(&mut self) {
-        if self.in_transaction {
-            self.rollback_transaction();
-        }
+        self.cache_ids(&items).map(|store| {
+            (
+                quads
+                    .into_iter()
+                    .map(|f| store.cache.translate_quad(f))
+                    .collect(),
+                store,
+            )
+        })
     }
 }
