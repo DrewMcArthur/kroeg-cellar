@@ -4,6 +4,7 @@ use kroeg_tap::StoreItem;
 use std::collections::HashMap;
 use tokio_postgres::Row;
 
+#[derive(Debug)]
 pub struct EntityCache {
     pub id_to_uri: HashMap<i32, String>,
     pub uri_to_id: HashMap<String, i32>,

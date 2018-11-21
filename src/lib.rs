@@ -1,15 +1,16 @@
+#![feature(existential_type)]
+
 extern crate futures;
-extern crate futures_state_stream;
 extern crate jsonld;
 extern crate kroeg_tap;
 extern crate serde_json;
 extern crate tokio_postgres;
 
-use futures::{future, stream, Future, Stream};
-use futures_state_stream::{StateStream, StreamEvent};
+use futures::{future::{self, Either}, stream, Future, Stream};
 use jsonld::rdf::StringQuad;
 use std::collections::HashSet;
 use tokio_postgres::{error::Error, Client, Connection, Row, Statement};
+use std::fmt;
 
 mod statements;
 pub use statements::*;
@@ -17,10 +18,22 @@ pub use statements::*;
 mod cache;
 pub use cache::*;
 
+mod entitystore;
+
 struct CellarEntityStore {
-    connection: Client,
-    statements: Statements,
-    cache: EntityCache,
+    pub(crate) connection: Client,
+    pub(crate) statements: Statements,
+    pub(crate) cache: EntityCache,
+}
+
+impl fmt::Debug for CellarEntityStore {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("CellarEntityStore")
+            .field("connection", &format_args!("[redacted]"))
+            .field("statements", &format_args!("[there are statements.]"))
+            .field("cache", &self.cache)
+            .finish()
+    }
 }
 
 pub enum DatabaseQuadContents {
@@ -123,15 +136,19 @@ impl CellarEntityStore {
         self,
         uris: &[String],
     ) -> impl Future<Item = CellarEntityStore, Error = (Error, CellarEntityStore)> {
-        // XXX todo: 0 item optimization
-        let (mut connection, statements, cache) = self.unwrap();
         let uncached: Vec<_> = uris
             .iter()
-            .filter(|&f| !cache.uri_to_id.contains_key(f))
+            .filter(|&f| !self.cache.uri_to_id.contains_key(f))
             .collect();
-        let query = connection.query(&statements.upsert_attributes, &[&uncached]);
 
-        CellarEntityStore::cache_attribute_rows(connection, cache, statements, query)
+        if uncached.len() > 0 {
+            let (mut connection, statements, cache) = self.unwrap();
+            let query = connection.query(&statements.upsert_attributes, &[&uncached]);
+
+            Either::A(CellarEntityStore::cache_attribute_rows(connection, cache, statements, query))
+        } else {
+            Either::B(future::ok(self))
+        }
     }
 
     /// Takes a slice of IDs, queries them from the database, and stores them into the cache.
@@ -139,14 +156,19 @@ impl CellarEntityStore {
         self,
         ids: &[i32],
     ) -> impl Future<Item = CellarEntityStore, Error = (Error, CellarEntityStore)> {
-        let (mut connection, statements, cache) = self.unwrap();
         let uncached: Vec<_> = ids
             .iter()
-            .filter(|f| !cache.id_to_uri.contains_key(f))
+            .filter(|f| !self.cache.id_to_uri.contains_key(f))
             .collect();
-        let query = connection.query(&statements.select_attributes, &[&uncached]);
 
-        CellarEntityStore::cache_attribute_rows(connection, cache, statements, query)
+        if uncached.len() > 0 {
+            let (mut connection, statements, cache) = self.unwrap();
+            let query = connection.query(&statements.select_attributes, &[&uncached]);
+
+            Either::A(CellarEntityStore::cache_attribute_rows(connection, cache, statements, query))
+        } else {
+            Either::B(future::ok(self))
+        }
     }
 
     /// Reads all the quads stored for a specific quad ID.
