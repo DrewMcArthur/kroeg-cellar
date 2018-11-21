@@ -51,7 +51,7 @@ impl EntityStore for CellarEntityStore {
     // ---
 
     /// The `Future` that is returned when `put`ting a `StoreItem`.
-    existential type StoreFuture: Future<Item = (StoreItem, Self), Error = (Self::Error, Self)> + 'static + Send;
+    existential type StoreFuture: Future<Item = (StoreItem, Self), Error = (Error, Self)> + 'static + Send;
 
     /// Stores a single `StoreItem` into the store.
     ///
@@ -64,7 +64,7 @@ impl EntityStore for CellarEntityStore {
     // -----
 
     /// The `Future` that is returned when querying the database.
-    existential type QueryFuture: Future<Item = (Vec<Vec<String>>, Self), Error = (Self::Error, Self)>
+    existential type QueryFuture: Future<Item = (Vec<Vec<String>>, Self), Error = (Error, Self)>
         + 'static
         + Send;
 
@@ -78,7 +78,7 @@ impl EntityStore for CellarEntityStore {
     // -----
 
     /// The `Future` that is returned when reading the collection data.
-    existential type ReadCollectionFuture: Future<Item = (CollectionPointer, Self), Error = (Self::Error, Self)>
+    existential type ReadCollectionFuture: Future<Item = (CollectionPointer, Self), Error = (Error, Self)>
         + 'static
         + Send;
 
@@ -102,7 +102,7 @@ impl EntityStore for CellarEntityStore {
 
     // -----
 
-    existential type FindCollectionFuture: Future<Item = (CollectionPointer, Self), Error = (Self::Error, Self)> + 'static + Send;
+    existential type FindCollectionFuture: Future<Item = (CollectionPointer, Self), Error = (Error, Self)> + 'static + Send;
 
     /// Finds an item in a collection. The result will contain cursors to just before and after the item, if it exists.
     fn find_collection(self, path: String, item: String) -> Self::FindCollectionFuture {
@@ -119,7 +119,7 @@ impl EntityStore for CellarEntityStore {
     // -----
 
     /// The `Future` that is returned when writing into a collection.
-    existential type WriteCollectionFuture: Future<Item = Self, Error = (Self::Error, Self)> + 'static + Send;
+    existential type WriteCollectionFuture: Future<Item = Self, Error = (Error, Self)> + 'static + Send;
 
     /// Inserts an item into the back of the collection.
     fn insert_collection(self, path: String, item: String) -> Self::WriteCollectionFuture {
@@ -128,7 +128,7 @@ impl EntityStore for CellarEntityStore {
 
     // -----
 
-    existential type ReadCollectionInverseFuture: Future<Item = (CollectionPointer, Self), Error = (Self::Error, Self)> + 'static + Send;
+    existential type ReadCollectionInverseFuture: Future<Item = (CollectionPointer, Self), Error = (Error, Self)> + 'static + Send;
 
     /// Finds all the collections containing a specific object.
     fn read_collection_inverse(self, item: String) -> Self::ReadCollectionInverseFuture {
@@ -144,7 +144,7 @@ impl EntityStore for CellarEntityStore {
 
     // -----
 
-    existential type RemoveCollectionFuture: Future<Item = Self, Error = (Self::Error, Self)> + 'static + Send;
+    existential type RemoveCollectionFuture: Future<Item = Self, Error = (Error, Self)> + 'static + Send;
 
     /// Removes an item from the collection.
     fn remove_collection(self, path: String, item: String) -> Self::RemoveCollectionFuture {
