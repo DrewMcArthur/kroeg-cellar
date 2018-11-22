@@ -6,6 +6,16 @@ use jsonld::rdf::{jsonld_to_rdf, rdf_to_jsonld};
 use serde_json::Value as JValue;
 use std::collections::HashMap;
 
+fn get_ids(quad: &StringQuad, set: &mut HashSet) {
+    match quad.contents {
+        QuadContents::Id(id) => set.insert(id.to_owned()),
+        QuadContents::Object(type_id, _, _) => set.insert(type_id.to_owned()),
+    };
+
+    set.insert(quad.subject_id.to_owned());
+    set.insert(quad.predicate_id.to_owned());
+}
+
 /// An entity store, storing JSON-LD `Entity` objects.
 impl EntityStore for CellarEntityStore {
     /// The error type that will be returned if this store fails to get or put
@@ -15,16 +25,16 @@ impl EntityStore for CellarEntityStore {
     // ---
 
     /// The `Future` that is returned when `get`ting a `StoreItem`.
-    existential type GetFuture: Future<Item = (Option<StoreItem>, Self), Error = (Error, Self)>
-        + 'static
-        + Send;
+    type GetFuture = Box<Future<Item = (Option<StoreItem>, Self), Error = (Error, Self)>
+        
+        + Send>;
 
     /// Gets a single `StoreItem` from the store. Missing entities are no error,
     /// but instead returns a `None`.
     fn get(self, path: String, _local: bool) -> Self::GetFuture {
         let id = path.to_owned();
 
-        self.cache_uris(&[path.to_owned()])
+        Box::new(self.cache_uris(&[path.to_owned()])
             .and_then(move |store| {
                 let i = store.cache.uri_to_id[&path];
                 store.read_quad(i)
@@ -45,42 +55,53 @@ impl EntityStore for CellarEntityStore {
 
                     _ => unreachable!(),
                 }
-            })
+            }))
     }
 
     // ---
 
     /// The `Future` that is returned when `put`ting a `StoreItem`.
-    existential type StoreFuture: Future<Item = (StoreItem, Self), Error = (Error, Self)> + 'static + Send;
+    type StoreFuture = Box<Future<Item = (StoreItem, Self), Error = (Error, Self)>  + Send>;
 
     /// Stores a single `StoreItem` into the store.
     ///
     /// To delete an Entity, set its type to as:Tombstone. This may
     /// instantly remove it, or queue it for possible future deletion.
     fn put(self, path: String, item: StoreItem) -> Self::StoreFuture {
-        future::ok((item, self))
+        let item = item.to_json();
+
+        let rdf = jsonld_to_rdf(item, &mut StoreItemNodeGenerator::new()).unwrap();
+        let mut set = HashSet::new();
+        let quads = rdf.get("@default").unwrap().clone();
+        for quad in &quads {
+            get_ids(quad, &mut set);
+        }
+
+        
+
+        Box::new(future::ok((item, self)))
     }
 
     // -----
 
     /// The `Future` that is returned when querying the database.
-    existential type QueryFuture: Future<Item = (Vec<Vec<String>>, Self), Error = (Error, Self)>
-        + 'static
-        + Send;
+    type QueryFuture = Box<Future<Item = (Vec<Vec<String>>, Self), Error = (Error, Self)>
+        
+        + Send>;
 
     /// Queries the entire store for a specific set of parameters.
     /// The return value is a list for every result in the database that matches the query.
     /// The array elements are in numeric order of the placeholders.
     fn query(self, query: Vec<QuadQuery>) -> Self::QueryFuture {
-        future::ok((vec![], self))
+        Box::new(future::ok((vec![], self)))
     }
 
     // -----
 
     /// The `Future` that is returned when reading the collection data.
-    existential type ReadCollectionFuture: Future<Item = (CollectionPointer, Self), Error = (Error, Self)>
-        + 'static
-        + Send;
+    type ReadCollectionFuture = Box<Future<Item = (CollectionPointer, Self), Error = (Error, Self)>
+        
+        + Send>;
 
     /// Reads N amount of items from the collection corresponding to a specific ID. If a cursor is passed,
     /// it can be used to paginate.
@@ -97,12 +118,12 @@ impl EntityStore for CellarEntityStore {
             count: None,
         };
         
-        future::ok((ptr, self))
+        Box::new(future::ok((ptr, self)))
     }
 
     // -----
 
-    existential type FindCollectionFuture: Future<Item = (CollectionPointer, Self), Error = (Error, Self)> + 'static + Send;
+    type FindCollectionFuture = Box<Future<Item = (CollectionPointer, Self), Error = (Error, Self)>  + Send>;
 
     /// Finds an item in a collection. The result will contain cursors to just before and after the item, if it exists.
     fn find_collection(self, path: String, item: String) -> Self::FindCollectionFuture {
@@ -113,22 +134,22 @@ impl EntityStore for CellarEntityStore {
             count: None,
         };
         
-        future::ok((ptr, self))
+        Box::new(future::ok((ptr, self)))
     }
 
     // -----
 
     /// The `Future` that is returned when writing into a collection.
-    existential type WriteCollectionFuture: Future<Item = Self, Error = (Error, Self)> + 'static + Send;
+    type WriteCollectionFuture = Box<Future<Item = Self, Error = (Error, Self)>  + Send>;
 
     /// Inserts an item into the back of the collection.
     fn insert_collection(self, path: String, item: String) -> Self::WriteCollectionFuture {
-        future::ok(self)
+        Box::new(future::ok(self))
     }
 
     // -----
 
-    existential type ReadCollectionInverseFuture: Future<Item = (CollectionPointer, Self), Error = (Error, Self)> + 'static + Send;
+    type ReadCollectionInverseFuture = Box<Future<Item = (CollectionPointer, Self), Error = (Error, Self)>  + Send>;
 
     /// Finds all the collections containing a specific object.
     fn read_collection_inverse(self, item: String) -> Self::ReadCollectionInverseFuture {
@@ -139,15 +160,15 @@ impl EntityStore for CellarEntityStore {
             count: None,
         };
         
-        future::ok((ptr, self))
+        Box::new(future::ok((ptr, self)))
     }
 
     // -----
 
-    existential type RemoveCollectionFuture: Future<Item = Self, Error = (Error, Self)> + 'static + Send;
+    type RemoveCollectionFuture = Box<Future<Item = Self, Error = (Error, Self)>  + Send>;
 
     /// Removes an item from the collection.
     fn remove_collection(self, path: String, item: String) -> Self::RemoveCollectionFuture {
-        future::ok(self)
+        Box::new(future::ok(self))
     }
 }
