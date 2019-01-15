@@ -33,7 +33,7 @@ const STATEMENTS: &[&'static str] = &[
     "delete from quad where quad_id = $1",
 
     // insert_collection
-    "insert into collection_item (collection_id, object_id) values ($1, $2)",
+    "insert into collection_item (collection_id, object_id) values ($1, $2) on conflict do nothing",
 
     // delete_collection
     "delete from collection_item where collection_id = $1 and object_id = $2",
