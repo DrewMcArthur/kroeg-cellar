@@ -4,12 +4,15 @@ extern crate kroeg_tap;
 extern crate serde_json;
 extern crate tokio_postgres;
 
-use futures::{future::{self, Either}, stream, Future, Stream, Poll, Async};
+use futures::{
+    future::{self, Either},
+    stream, Async, Future, Poll, Stream,
+};
 use jsonld::rdf::StringQuad;
 use std::collections::HashSet;
-use tokio_postgres::{error::Error, Client, Connection, Row, Statement, TlsMode};
 use std::fmt;
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
+use tokio_postgres::{error::Error, types::ToSql, Client, Connection, Row, Statement, TlsMode};
 
 mod statements;
 pub use statements::*;
@@ -18,6 +21,7 @@ mod cache;
 pub use cache::*;
 
 mod entitystore;
+mod queuestore;
 
 pub struct CellarEntityStore {
     pub(crate) client: Client,
@@ -75,14 +79,30 @@ impl From<&Row> for DatabaseQuad {
     }
 }
 
+pub struct CollectionItem {
+    pub id: i32,
+    pub collection_id: i32,
+    pub object_id: i32,
+}
+
+impl From<&Row> for CollectionItem {
+    fn from(row: &Row) -> CollectionItem {
+        CollectionItem {
+            id: row.get(0),
+            collection_id: row.get(2),
+            object_id: row.get(1),
+        }
+    }
+}
+
 struct ButAlsoPoll<T: Future>(Option<Connection>, T, Instant);
-impl <T: Future> ButAlsoPoll<T> {
+impl<T: Future> ButAlsoPoll<T> {
     pub fn new(connection: Connection, future: T) -> Self {
         ButAlsoPoll(Some(connection), future, Instant::now())
     }
 }
 
-impl <T: Future<Error = Error>> Future for ButAlsoPoll<T> {
+impl<T: Future<Error = Error>> Future for ButAlsoPoll<T> {
     type Item = (Connection, T::Item);
     type Error = (Connection, Error);
 
@@ -94,7 +114,6 @@ impl <T: Future<Error = Error>> Future for ButAlsoPoll<T> {
         match self.1.poll() {
             Ok(Async::Ready(ready)) => {
                 let duration = Instant::now() - self.2;
-                println!("took {:?}", duration);
                 Ok(Async::Ready((self.0.take().unwrap(), ready)))
             }
 
@@ -110,8 +129,7 @@ impl CellarEntityStore {
         let start = Instant::now();
         tokio_postgres::connect(params, TlsMode::None)
             .and_then(move |(client, connection)| {
-                ButAlsoPoll::new(connection, Statements::make(client))
-                    .map_err(|(conn, e)| e)
+                ButAlsoPoll::new(connection, Statements::make(client)).map_err(|(conn, e)| e)
             })
             .map(move |(conn, (stmts, client))| {
                 let duration = Instant::now() - start;
@@ -119,7 +137,7 @@ impl CellarEntityStore {
                     client: client,
                     connection: conn,
                     statements: stmts,
-                    cache: EntityCache::new()
+                    cache: EntityCache::new(),
                 }
             })
     }
@@ -137,33 +155,31 @@ impl CellarEntityStore {
         statements: Statements,
         stream: T,
     ) -> impl Future<Item = CellarEntityStore, Error = (Error, CellarEntityStore)> {
-        ButAlsoPoll::new(connection, stream.collect()).then(move |future| {
-            match future {
-                Ok((connection, rows)) => {
-                    let mut store = CellarEntityStore {
-                        client: client,
-                        connection: connection,
-                        statements: statements,
-                        cache: cache,
-                    };
+        ButAlsoPoll::new(connection, stream.collect()).then(move |future| match future {
+            Ok((connection, rows)) => {
+                let mut store = CellarEntityStore {
+                    client: client,
+                    connection: connection,
+                    statements: statements,
+                    cache: cache,
+                };
 
-                    for row in rows {
-                        store.cache.cache_attribute_row(row);
-                    }
-
-                    future::ok(store)
+                for row in rows {
+                    store.cache.cache_attribute_row(row);
                 }
 
-                Err((connection, e)) => {
-                    let mut store = CellarEntityStore {
-                        client: client,
-                        connection: connection,
-                        statements: statements,
-                        cache: cache,
-                    };
+                future::ok(store)
+            }
 
-                    future::err((e, store))
-                }
+            Err((connection, e)) => {
+                let mut store = CellarEntityStore {
+                    client: client,
+                    connection: connection,
+                    statements: statements,
+                    cache: cache,
+                };
+
+                future::err((e, store))
             }
         })
     }
@@ -203,58 +219,6 @@ impl CellarEntityStore {
         })
     }
 
-    /// Takes a slice of Strings, queries them into the database, then stores them into the cache
-    pub fn cache_uris(
-        self,
-        uris: &[String],
-    ) -> impl Future<Item = CellarEntityStore, Error = (Error, CellarEntityStore)> {
-        let uncached: Vec<_> = uris
-            .iter()
-            .filter(|&f| !self.cache.uri_to_id.contains_key(f))
-            .collect();
-
-        if uncached.len() > 0 {
-            let (mut client, connection, statements, cache) = self.unwrap();
-            let query = client.query(&statements.upsert_attributes, &[&uncached]);
-
-            Either::A(CellarEntityStore::cache_attribute_rows(client, connection, cache, statements, query))
-        } else {
-            Either::B(future::ok(self))
-        }
-    }
-
-    /// Takes a slice of IDs, queries them from the database, and stores them into the cache.
-    pub fn cache_ids(
-        self,
-        ids: &[i32],
-    ) -> impl Future<Item = CellarEntityStore, Error = (Error, CellarEntityStore)> {
-        let uncached: Vec<_> = ids
-            .iter()
-            .filter(|f| !self.cache.id_to_uri.contains_key(f))
-            .collect();
-
-        if uncached.len() > 0 {
-            let (mut client, connection, statements, cache) = self.unwrap();
-            let query = client.query(&statements.select_attributes, &[&uncached]);
-
-            Either::A(CellarEntityStore::cache_attribute_rows(client, connection, cache, statements, query))
-        } else {
-            Either::B(future::ok(self))
-        }
-    }
-
-    /// Reads all the quads stored for a specific quad ID.
-    fn read_quad(
-        self,
-        id: i32,
-    ) -> impl Future<Item = (Vec<DatabaseQuad>, CellarEntityStore), Error = (Error, CellarEntityStore)>
-    {
-        let (mut client, connection, statements, cache) = self.unwrap();
-        let query = client.query(&statements.select_quad, &[&id]);
-
-        CellarEntityStore::translate_quad_stream(client, connection, cache, statements, query)
-    }
-
     /// Collects all IDs used inside the passed quads. Can be used to cache all the IDs.
     fn collect_quad_ids(&self, quads: &[DatabaseQuad]) -> HashSet<i32> {
         let mut out = HashSet::new();
@@ -289,6 +253,398 @@ impl CellarEntityStore {
                     .collect(),
                 store,
             )
+        })
+    }
+
+    /// Takes a slice of Strings, queries them into the database, then stores them into the cache
+    pub fn cache_uris(
+        self,
+        uris: &[String],
+    ) -> impl Future<Item = CellarEntityStore, Error = (Error, CellarEntityStore)> {
+        let uncached: Vec<_> = uris
+            .iter()
+            .filter(|&f| !self.cache.uri_to_id.contains_key(f))
+            .collect();
+
+        if uncached.len() > 0 {
+            let (mut client, connection, statements, cache) = self.unwrap();
+            let query = client.query(&statements.upsert_attributes, &[&uncached]);
+
+            Either::A(CellarEntityStore::cache_attribute_rows(
+                client, connection, cache, statements, query,
+            ))
+        } else {
+            Either::B(future::ok(self))
+        }
+    }
+
+    /// Takes a slice of IDs, queries them from the database, and stores them into the cache.
+    pub fn cache_ids(
+        self,
+        ids: &[i32],
+    ) -> impl Future<Item = CellarEntityStore, Error = (Error, CellarEntityStore)> {
+        let uncached: Vec<_> = ids
+            .iter()
+            .filter(|f| !self.cache.id_to_uri.contains_key(f))
+            .collect();
+
+        if uncached.len() > 0 {
+            let (mut client, connection, statements, cache) = self.unwrap();
+            let query = client.query(&statements.select_attributes, &[&uncached]);
+
+            Either::A(CellarEntityStore::cache_attribute_rows(
+                client, connection, cache, statements, query,
+            ))
+        } else {
+            Either::B(future::ok(self))
+        }
+    }
+
+    /// Reads all the quads stored for a specific quad ID.
+    fn read_quad(
+        self,
+        id: i32,
+    ) -> impl Future<Item = (Vec<DatabaseQuad>, CellarEntityStore), Error = (Error, CellarEntityStore)>
+    {
+        let (mut client, connection, statements, cache) = self.unwrap();
+        let query = client.query(&statements.select_quad, &[&id]);
+
+        CellarEntityStore::translate_quad_stream(client, connection, cache, statements, query)
+    }
+
+    /// Removes all the quads stored for a specific quad ID.
+    fn delete_quad(
+        self,
+        id: i32,
+    ) -> impl Future<Item = (u64, CellarEntityStore), Error = (Error, CellarEntityStore)> {
+        let (mut client, connection, statements, cache) = self.unwrap();
+        let query = client.execute(&statements.delete_quads, &[&id]);
+        ButAlsoPoll::new(connection, query).then(|future| match future {
+            Ok((connection, count)) => future::ok((
+                count,
+                CellarEntityStore {
+                    client: client,
+                    connection: connection,
+                    statements: statements,
+                    cache: cache,
+                },
+            )),
+
+            Err((connection, e)) => future::err((
+                e,
+                CellarEntityStore {
+                    client: client,
+                    connection: connection,
+                    statements: statements,
+                    cache: cache,
+                },
+            )),
+        })
+    }
+
+    fn insert_quad(
+        self,
+        data: &[&ToSql],
+    ) -> impl Future<Item = (u64, CellarEntityStore), Error = (Error, CellarEntityStore)> {
+        let (mut client, connection, statements, cache) = self.unwrap();
+        let query = client.execute(&statements.insert_quads, data);
+        ButAlsoPoll::new(connection, query).then(|future| match future {
+            Ok((connection, count)) => future::ok((
+                count,
+                CellarEntityStore {
+                    client: client,
+                    connection: connection,
+                    statements: statements,
+                    cache: cache,
+                },
+            )),
+
+            Err((connection, e)) => future::err((
+                e,
+                CellarEntityStore {
+                    client: client,
+                    connection: connection,
+                    statements: statements,
+                    cache: cache,
+                },
+            )),
+        })
+    }
+
+    fn insert_collection(
+        self,
+        collection: i32,
+        object: i32,
+    ) -> impl Future<Item = CellarEntityStore, Error = (Error, CellarEntityStore)> {
+        let (mut client, connection, statements, cache) = self.unwrap();
+        ButAlsoPoll::new(
+            connection,
+            client.execute(&statements.insert_collection, &[&collection, &object]),
+        )
+        .then(|future| match future {
+            Ok((connection, _)) => future::ok(CellarEntityStore {
+                client,
+                connection,
+                statements,
+                cache,
+            }),
+
+            Err((connection, e)) => future::err((
+                e,
+                CellarEntityStore {
+                    client,
+                    connection,
+                    statements,
+                    cache,
+                },
+            )),
+        })
+    }
+
+    fn delete_collection(
+        self,
+        collection: i32,
+        object: i32,
+    ) -> impl Future<Item = CellarEntityStore, Error = (Error, CellarEntityStore)> {
+        let (mut client, connection, statements, cache) = self.unwrap();
+        ButAlsoPoll::new(
+            connection,
+            client.execute(&statements.delete_collection, &[&collection, &object]),
+        )
+        .then(|future| match future {
+            Ok((connection, _)) => future::ok(CellarEntityStore {
+                client,
+                connection,
+                statements,
+                cache,
+            }),
+
+            Err((connection, e)) => future::err((
+                e,
+                CellarEntityStore {
+                    client,
+                    connection,
+                    statements,
+                    cache,
+                },
+            )),
+        })
+    }
+
+    fn select_collection(
+        self,
+        collection: i32,
+        offset: i32,
+        limit: i32,
+        until: bool,
+    ) -> impl Future<Item = (Vec<CollectionItem>, CellarEntityStore), Error = (Error, CellarEntityStore)>
+    {
+        let (mut client, connection, statements, cache) = self.unwrap();
+
+        let future = client
+            .query(
+                if until {
+                    &statements.select_collection_reverse
+                } else {
+                    &statements.select_collection
+                },
+                &[&collection, &offset, &(limit as i64)],
+            )
+            .map(|f| CollectionItem {
+                id: f.get(0),
+                collection_id: f.get(1),
+                object_id: f.get(2),
+            })
+            .collect();
+
+        ButAlsoPoll::new(connection, future).then(move |future| match future {
+            Ok((connection, mut items)) => {
+                if !until {
+                    items.reverse();
+                }
+
+                future::ok((
+                    items,
+                    CellarEntityStore {
+                        client,
+                        connection,
+                        statements,
+                        cache,
+                    },
+                ))
+            }
+
+            Err((connection, e)) => future::err((
+                e,
+                CellarEntityStore {
+                    client,
+                    connection,
+                    statements,
+                    cache,
+                },
+            )),
+        })
+    }
+
+    fn collection_contains(
+        self,
+        collection: i32,
+        item: i32,
+    ) -> impl Future<Item = (bool, CellarEntityStore), Error = (Error, CellarEntityStore)> {
+        let (mut client, connection, statements, cache) = self.unwrap();
+        let future = client
+            .query(&statements.find_collection, &[&collection, &item])
+            .collect();
+
+        ButAlsoPoll::new(connection, future).then(move |future| match future {
+            Ok((connection, mut items)) => future::ok((
+                !items.is_empty(),
+                CellarEntityStore {
+                    client,
+                    connection,
+                    statements,
+                    cache,
+                },
+            )),
+
+            Err((connection, e)) => future::err((
+                e,
+                CellarEntityStore {
+                    client,
+                    connection,
+                    statements,
+                    cache,
+                },
+            )),
+        })
+    }
+
+    fn do_query(
+        self,
+        q: String,
+        data: Vec<String>,
+    ) -> impl Future<Item = (Vec<Row>, CellarEntityStore), Error = (Error, CellarEntityStore)> {
+        let (mut client, connection, statements, cache) = self.unwrap();
+
+        let future = client.prepare(&q).then(move |statement| {
+            match statement {
+                Ok(statement) => Either::A(
+                    client
+                        .query(
+                            &statement,
+                            &data.iter().map(|f| f as &ToSql).collect::<Vec<_>>(),
+                        )
+                        .collect(),
+                ),
+                Err(e) => Either::B(future::err(e)),
+            }
+            .then(move |future| match future {
+                // big cursed hack. Need to somehow transport the client variable over, but it's captured in this thing. do the bad thing and turn Err into Ok(Err).
+                Ok(items) => future::ok(Ok((client, items))),
+                Err(e) => future::ok(Err((client, e))),
+            })
+        });
+
+        ButAlsoPoll::new(connection, future).then(move |future| match future {
+            Ok((connection, Ok((client, items)))) => future::ok((
+                items,
+                CellarEntityStore {
+                    client,
+                    connection,
+                    statements,
+                    cache,
+                },
+            )),
+
+            Ok((connection, Err((client, e)))) => future::err((
+                e,
+                CellarEntityStore {
+                    client,
+                    connection,
+                    statements,
+                    cache,
+                },
+            )),
+
+            _ => unreachable!(),
+        })
+    }
+
+    fn pop_queue(
+        self,
+    ) -> impl Future<
+        Item = (Option<(String, String)>, CellarEntityStore),
+        Error = (Error, CellarEntityStore),
+    > {
+        let (mut client, connection, statements, cache) = self.unwrap();
+
+        let future = client.query(&statements.queue_item_pop, &[]).collect();
+
+        ButAlsoPoll::new(connection, future).then(move |future| match future {
+            Ok((connection, mut items)) => {
+                if items.len() == 0 {
+                    return future::ok((
+                        None,
+                        CellarEntityStore {
+                            client,
+                            connection,
+                            statements,
+                            cache,
+                        },
+                    ));
+                }
+
+                let first = items.remove(0);
+                future::ok((
+                    Some((first.get(0), first.get(1))),
+                    CellarEntityStore {
+                        client,
+                        connection,
+                        statements,
+                        cache,
+                    },
+                ))
+            }
+
+            Err((connection, e)) => future::err((
+                e,
+                CellarEntityStore {
+                    client,
+                    connection,
+                    statements,
+                    cache,
+                },
+            )),
+        })
+    }
+
+    fn push_queue(
+        self,
+        event: String,
+        data: String,
+    ) -> impl Future<Item = CellarEntityStore, Error = (Error, CellarEntityStore)> {
+        let (mut client, connection, statements, cache) = self.unwrap();
+        ButAlsoPoll::new(
+            connection,
+            client.execute(&statements.queue_item_put, &[&event, &data]),
+        )
+        .then(|future| match future {
+            Ok((connection, _)) => future::ok(CellarEntityStore {
+                client,
+                connection,
+                statements,
+                cache,
+            }),
+
+            Err((connection, e)) => future::err((
+                e,
+                CellarEntityStore {
+                    client,
+                    connection,
+                    statements,
+                    cache,
+                },
+            )),
         })
     }
 }

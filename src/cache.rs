@@ -1,5 +1,5 @@
 use crate::{DatabaseQuad, DatabaseQuadContents};
-use jsonld::rdf::{StringQuad, QuadContents};
+use jsonld::rdf::{QuadContents, StringQuad};
 use kroeg_tap::StoreItem;
 use std::collections::HashMap;
 use tokio_postgres::Row;
@@ -61,8 +61,14 @@ impl EntityCache {
     pub fn translate_quad(&self, quad: DatabaseQuad) -> StringQuad {
         let contents = match quad.contents {
             DatabaseQuadContents::Id(id) => QuadContents::Id(self.id_to_uri[&id].clone()),
-            DatabaseQuadContents::Object { contents, type_id } => QuadContents::Object(self.id_to_uri[&type_id].clone(), contents, None),
-            DatabaseQuadContents::LanguageString { contents, language } => QuadContents::Object("http://www.w3.org/2000/01/rdf-schema#langString".to_owned(), contents, Some(language)),
+            DatabaseQuadContents::Object { contents, type_id } => {
+                QuadContents::Object(self.id_to_uri[&type_id].clone(), contents, None)
+            }
+            DatabaseQuadContents::LanguageString { contents, language } => QuadContents::Object(
+                "http://www.w3.org/2000/01/rdf-schema#langString".to_owned(),
+                contents,
+                Some(language),
+            ),
         };
 
         StringQuad {
@@ -71,7 +77,7 @@ impl EntityCache {
             contents: contents,
         }
     }
-    
+
     pub(crate) fn new() -> Self {
         EntityCache {
             id_to_uri: HashMap::new(),
