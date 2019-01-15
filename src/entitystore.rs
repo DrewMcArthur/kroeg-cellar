@@ -221,6 +221,10 @@ impl EntityStore for CellarEntityStore {
                 }
 
                 QueryObject::Id(QueryId::Any(any)) => {
+                    if any.len() == 0 {
+                        return Box::new(future::ok((vec![], self)));
+                    }
+
                     checks_any.insert(format!("quad_{}.attribute_id", i), any);
                 }
 
@@ -304,12 +308,12 @@ impl EntityStore for CellarEntityStore {
                     for (a, b) in checks {
                         let against = store.cache.uri_to_id[&b];
 
-                        query += &format!(" and {} = {}", a, against);
+                        query += &format!("and {} = {} ", a, against);
                     }
 
                     for (a, b) in checks_any {
                         query += &format!(
-                            "and {} in ({})",
+                            "and {} in ({}) ",
                             a,
                             b.into_iter()
                                 .map(|f| store.cache.uri_to_id[&f].to_string())
