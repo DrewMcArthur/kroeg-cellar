@@ -486,6 +486,45 @@ impl CellarEntityStore {
         })
     }
 
+    fn select_collection_inverse(
+        self,
+        object: i32,
+    ) -> impl Future<Item = (Vec<CollectionItem>, CellarEntityStore), Error = (Error, CellarEntityStore)>
+    {
+        let (mut client, connection, statements, cache) = self.unwrap();
+
+        let future = client
+            .query(&statements.select_collection_inverse, &[&object])
+            .map(|f| CollectionItem {
+                id: f.get(0),
+                collection_id: f.get(1),
+                object_id: f.get(2),
+            })
+            .collect();
+
+        ButAlsoPoll::new(connection, future).then(move |future| match future {
+            Ok((connection, mut items)) => future::ok((
+                items,
+                CellarEntityStore {
+                    client,
+                    connection,
+                    statements,
+                    cache,
+                },
+            )),
+
+            Err((connection, e)) => future::err((
+                e,
+                CellarEntityStore {
+                    client,
+                    connection,
+                    statements,
+                    cache,
+                },
+            )),
+        })
+    }
+
     fn collection_contains(
         self,
         collection: i32,

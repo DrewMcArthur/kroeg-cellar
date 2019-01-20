@@ -372,7 +372,7 @@ impl EntityStore for CellarEntityStore {
         let (until, offset) = match cursor {
             None => (true, i32::max_value()),
             Some(ref value) if value.starts_with("before-") => match value[7..].parse::<i32>() {
-                Ok(val) => (true, val - 1),
+                Ok(val) => (false, val),
                 Err(e) => {
                     return Box::new(future::ok((
                         CollectionPointer {
@@ -385,8 +385,8 @@ impl EntityStore for CellarEntityStore {
                     )));
                 }
             },
-            Some(ref value) if value.starts_with("after-") => match value[7..].parse::<i32>() {
-                Ok(val) => (false, val + 1),
+            Some(ref value) if value.starts_with("after-") => match value[6..].parse::<i32>() {
+                Ok(val) => (true, val),
                 Err(e) => {
                     return Box::new(future::ok((
                         CollectionPointer {
@@ -436,15 +436,15 @@ impl EntityStore for CellarEntityStore {
                                 .collect(),
                             after: items
                                 .iter()
-                                .next()
-                                .map(|f| f.id)
-                                .or(offset.checked_add(1))
+                                .last()
+                                .and_then(|f| f.id.checked_sub(1))
+                                .or(if !until { offset.checked_sub(1) } else { None })
                                 .map(|val| format!("after-{}", val)),
                             before: items
                                 .iter()
-                                .last()
-                                .map(|f| f.id)
-                                .or(offset.checked_sub(1))
+                                .next()
+                                .and_then(|f| f.id.checked_add(1))
+                                .or(if until { offset.checked_add(1) } else { None })
                                 .map(|val| format!("before-{}", val)),
                             count: None,
                         },
@@ -476,8 +476,8 @@ impl EntityStore for CellarEntityStore {
                         (
                             CollectionPointer {
                                 items: vec![item],
-                                after: item_id.checked_add(1).map(|val| format!("after-{}", val)),
-                                before: item_id.checked_sub(1).map(|val| format!("before-{}", val)),
+                                after: item_id.checked_sub(1).map(|val| format!("after-{}", val)),
+                                before: item_id.checked_add(1).map(|val| format!("before-{}", val)),
                                 count: None,
                             },
                             store,
@@ -521,14 +521,35 @@ impl EntityStore for CellarEntityStore {
 
     /// Finds all the collections containing a specific object.
     fn read_collection_inverse(self, item: String) -> Self::ReadCollectionInverseFuture {
-        let ptr = CollectionPointer {
-            items: vec![],
-            after: None,
-            before: None,
-            count: None,
-        };
+        Box::new(
+            self.cache_uris(&[item.to_owned()])
+                .and_then(move |store| {
+                    let id = store.cache.uri_to_id[&item];
+                    store.select_collection_inverse(id)
+                })
+                .and_then(move |(items, store)| {
+                    let mut ids = Vec::new();
+                    for item in &items {
+                        ids.extend_from_slice(&[item.collection_id]);
+                    }
 
-        Box::new(future::ok((ptr, self)))
+                    store.cache_ids(&ids).map(move |store| (items, store))
+                })
+                .map(move |(items, store)| {
+                    (
+                        CollectionPointer {
+                            items: items
+                                .iter()
+                                .map(|f| store.cache.id_to_uri[&f.collection_id].to_owned())
+                                .collect(),
+                            after: None,
+                            before: None,
+                            count: None,
+                        },
+                        store,
+                    )
+                }),
+        )
     }
 
     // -----

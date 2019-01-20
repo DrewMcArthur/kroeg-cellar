@@ -11,6 +11,7 @@ pub struct Statements {
     pub delete_collection: Statement,
     pub select_collection: Statement,
     pub select_collection_reverse: Statement,
+    pub select_collection_inverse: Statement,
     pub find_collection: Statement,
     pub queue_item_pop: Statement,
     pub queue_item_put: Statement,
@@ -44,6 +45,9 @@ const STATEMENTS: &[&'static str] = &[
     // select_collection_reverse
     "select id, collection_id, object_id from collection_item where collection_id = $1 and id <= $2 order by id desc limit $3",
 
+    // select_collection_inverse
+    "select id, collection_id, object_id from collection_item where object_id = $1",
+
     // find_collection
     "select id, collection_id, object_id from collection_item where collection_id = $1 and id = $2",
 
@@ -76,6 +80,7 @@ impl Statements {
                         delete_collection: stmts.remove(0),
                         select_collection: stmts.remove(0),
                         select_collection_reverse: stmts.remove(0),
+                        select_collection_inverse: stmts.remove(0),
                         find_collection: stmts.remove(0),
                         queue_item_pop: stmts.remove(0),
                         queue_item_put: stmts.remove(0),
