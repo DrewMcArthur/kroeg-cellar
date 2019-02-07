@@ -65,7 +65,7 @@ impl EntityCache {
                 QuadContents::Object(self.id_to_uri[&type_id].clone(), contents, None)
             }
             DatabaseQuadContents::LanguageString { contents, language } => QuadContents::Object(
-                "http://www.w3.org/2000/01/rdf-schema#langString".to_owned(),
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString".to_owned(),
                 contents,
                 Some(language),
             ),
