@@ -1,12 +1,11 @@
 use crate::CellarEntityStore;
-use futures::{future, stream, Future, Stream};
 use jsonld::rdf::{jsonld_to_rdf, rdf_to_jsonld, QuadContents, StringQuad};
 use kroeg_tap::StoreItemNodeGenerator;
-use kroeg_tap::{CollectionPointer, EntityStore, QuadQuery, QueryId, QueryObject, StoreItem};
+use kroeg_tap::{
+    CollectionPointer, EntityStore, QuadQuery, QueryId, QueryObject, StoreError, StoreItem,
+};
 use serde_json::Value as JValue;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use tokio_postgres::error::Error;
-use tokio_postgres::types::ToSql;
 
 fn get_ids(quad: &StringQuad, set: &mut HashSet<String>) {
     match &quad.contents {
@@ -18,61 +17,41 @@ fn get_ids(quad: &StringQuad, set: &mut HashSet<String>) {
     set.insert(quad.predicate_id.to_owned());
 }
 
+#[async_trait::async_trait]
 /// An entity store, storing JSON-LD `Entity` objects.
-impl EntityStore for CellarEntityStore {
-    /// The error type that will be returned if this store fails to get or put
-    /// the `StoreItem`
-    type Error = Error;
-
-    // ---
-
-    /// The `Future` that is returned when `get`ting a `StoreItem`.
-    type GetFuture = Box<Future<Item = (Option<StoreItem>, Self), Error = (Error, Self)> + Send>;
-
+impl<'a> EntityStore for CellarEntityStore<'a> {
     /// Gets a single `StoreItem` from the store. Missing entities are no error,
     /// but instead returns a `None`.
-    fn get(self, path: String, _local: bool) -> Self::GetFuture {
+    async fn get(&mut self, path: String, _local: bool) -> Result<Option<StoreItem>, StoreError> {
         let id = path.to_owned();
 
-        Box::new(
-            self.cache_uris(&[path.to_owned()])
-                .and_then(move |store| {
-                    let i = store.cache.uri_to_id[&path];
-                    store.read_quad(i)
-                })
-                .and_then(move |(items, store)| store.translate_quads(items))
-                .map(move |(quads, store)| {
-                    if quads.len() == 0 {
-                        return (None, store);
-                    }
+        self.cache_uris(&[path.clone()]).await?;
 
-                    let mut hash = HashMap::new();
-                    hash.insert("@default".to_owned(), quads);
-                    match rdf_to_jsonld(hash, true, false) {
-                        JValue::Object(jval) => {
-                            let jval = JValue::Array(jval.into_iter().map(|(_, b)| b).collect());
-                            (StoreItem::parse(&id, jval).ok(), store)
-                        }
+        let quads = self.read_quad(self.cache.uri_to_id[&path]).await?;
+        let translated = self.translate_quads(quads).await?;
+        if translated.is_empty() {
+            return Ok(None);
+        }
 
-                        _ => unreachable!(),
-                    }
-                }),
-        )
+        let mut hash = HashMap::new();
+        hash.insert("@default".to_owned(), translated);
+
+        if let JValue::Object(jval) = rdf_to_jsonld(&hash, true, false) {
+            let jval = JValue::Array(jval.into_iter().map(|(_, b)| b).collect());
+            Ok(Some(StoreItem::parse(&id, &jval)?))
+        } else {
+            unreachable!();
+        }
     }
-
-    // ---
-
-    /// The `Future` that is returned when `put`ting a `StoreItem`.
-    type StoreFuture = Box<Future<Item = (StoreItem, Self), Error = (Error, Self)> + Send>;
 
     /// Stores a single `StoreItem` into the store.
     ///
     /// To delete an Entity, set its type to as:Tombstone. This may
     /// instantly remove it, or queue it for possible future deletion.
-    fn put(mut self, path: String, item: StoreItem) -> Self::StoreFuture {
+    async fn put(&mut self, path: String, item: &mut StoreItem) -> Result<(), StoreError> {
         let rdf = item.clone().to_json();
 
-        let mut rdf = jsonld_to_rdf(rdf, &mut StoreItemNodeGenerator::new()).unwrap();
+        let mut rdf = jsonld_to_rdf(&rdf, &mut StoreItemNodeGenerator::new()).unwrap();
         let mut set = HashSet::new();
 
         let quads = rdf.remove("@default").unwrap();
@@ -83,66 +62,59 @@ impl EntityStore for CellarEntityStore {
         set.insert(path.to_owned());
 
         let set: Vec<_> = set.into_iter().collect();
-        Box::new(
-            self.cache_uris(&set)
-                .and_then(move |store| {
-                    // (quad_id, subject_id, predicate_id, attribute_id, object, type_id, language)
-                    let mut quad_id = Vec::with_capacity(quads.len());
-                    let mut subject_id = Vec::with_capacity(quads.len());
-                    let mut predicate_id = Vec::with_capacity(quads.len());
-                    let mut attribute_id = Vec::with_capacity(quads.len());
-                    let mut object = Vec::with_capacity(quads.len());
-                    let mut type_id = Vec::with_capacity(quads.len());
-                    let mut language = Vec::with_capacity(quads.len());
+        self.cache_uris(&set).await?;
 
-                    let qid = store.cache.uri_to_id[&path];
+        let mut quad_id = Vec::with_capacity(quads.len());
+        let mut subject_id = Vec::with_capacity(quads.len());
+        let mut predicate_id = Vec::with_capacity(quads.len());
+        let mut attribute_id = Vec::with_capacity(quads.len());
+        let mut object = Vec::with_capacity(quads.len());
+        let mut type_id = Vec::with_capacity(quads.len());
+        let mut language = Vec::with_capacity(quads.len());
 
-                    for quad in quads {
-                        quad_id.push(qid);
-                        subject_id.push(store.cache.uri_to_id[&quad.subject_id]);
-                        predicate_id.push(store.cache.uri_to_id[&quad.predicate_id]);
+        let qid = self.cache.uri_to_id[&path];
 
-                        match quad.contents {
-                            QuadContents::Id(id) => {
-                                attribute_id.push(Some(store.cache.uri_to_id[&id]));
-                                object.push(None);
-                                type_id.push(None);
-                                language.push(None);
-                            }
+        for quad in quads {
+            quad_id.push(qid);
+            subject_id.push(self.cache.uri_to_id[&quad.subject_id]);
+            predicate_id.push(self.cache.uri_to_id[&quad.predicate_id]);
 
-                            QuadContents::Object(typ_id, content, languag) => {
-                                attribute_id.push(None);
-                                object.push(Some(content));
-                                type_id.push(Some(store.cache.uri_to_id[&typ_id]));
-                                language.push(languag);
-                            }
-                        }
-                    }
-                    store.delete_quad(qid).and_then(move |(count, store)| {
-                        store.insert_quad(&[
-                            &quad_id as &ToSql,
-                            &subject_id,
-                            &predicate_id,
-                            &attribute_id,
-                            &object,
-                            &type_id,
-                            &language,
-                        ])
-                    })
-                })
-                .map(move |(_, store)| (item, store)),
-        )
+            match quad.contents {
+                QuadContents::Id(id) => {
+                    attribute_id.push(Some(self.cache.uri_to_id[&id]));
+                    object.push(None);
+                    type_id.push(None);
+                    language.push(None);
+                }
+
+                QuadContents::Object(typ_id, content, languag) => {
+                    attribute_id.push(None);
+                    object.push(Some(content));
+                    type_id.push(Some(self.cache.uri_to_id[&typ_id]));
+                    language.push(languag);
+                }
+            }
+        }
+
+        self.delete_quad(qid).await?;
+        self.insert_quad(&[
+            &quad_id,
+            &subject_id,
+            &predicate_id,
+            &attribute_id,
+            &object,
+            &type_id,
+            &language,
+        ])
+        .await?;
+
+        Ok(())
     }
-
-    // -----
-
-    /// The `Future` that is returned when querying the database.
-    type QueryFuture = Box<Future<Item = (Vec<Vec<String>>, Self), Error = (Error, Self)> + Send>;
 
     /// Queries the entire store for a specific set of parameters.
     /// The return value is a list for every result in the database that matches the query.
     /// The array elements are in numeric order of the placeholders.
-    fn query(self, query: Vec<QuadQuery>) -> Self::QueryFuture {
+    async fn query(&mut self, query: Vec<QuadQuery>) -> Result<Vec<Vec<String>>, StoreError> {
         // stores a map of statements (e.g. quad_1.quad_id) and what they should be equal to. (e.g. quad_1.quad_id -> [quad_2.attribute_id])
         let mut placeholders = BTreeMap::new();
 
@@ -174,7 +146,7 @@ impl EntityStore for CellarEntityStore {
                 }
                 QueryId::Any(any) => {
                     if any.len() == 0 {
-                        return Box::new(future::ok((vec![], self)));
+                        return Ok(vec![]);
                     }
 
                     checks_any.insert(format!("quad_{}.quad_id", i), any);
@@ -197,7 +169,7 @@ impl EntityStore for CellarEntityStore {
                 }
                 QueryId::Any(any) => {
                     if any.len() == 0 {
-                        return Box::new(future::ok((vec![], self)));
+                        return Ok(vec![]);
                     }
 
                     checks_any.insert(format!("quad_{}.predicate_id", i), any);
@@ -222,7 +194,7 @@ impl EntityStore for CellarEntityStore {
 
                 QueryObject::Id(QueryId::Any(any)) => {
                     if any.len() == 0 {
-                        return Box::new(future::ok((vec![], self)));
+                        return Ok(vec![]);
                     }
 
                     checks_any.insert(format!("quad_{}.attribute_id", i), any);
@@ -247,7 +219,7 @@ impl EntityStore for CellarEntityStore {
                         }
                         QueryId::Any(any) => {
                             if any.len() == 0 {
-                                return Box::new(future::ok((vec![], self)));
+                                return Ok(vec![]);
                             }
 
                             checks_any.insert(format!("quad_{}.type_id", i), any);
@@ -272,299 +244,206 @@ impl EntityStore for CellarEntityStore {
             )
             .collect::<Vec<_>>();
 
-        Box::new(
-            self.cache_uris(&all_attributes)
-                .and_then(move |store| {
-                    let mut query = String::from("select ");
-                    for (i, (_, placeholder)) in placeholders.iter().enumerate() {
-                        if i != 0 {
-                            query += ", ";
-                        }
+        self.cache_uris(&all_attributes).await?;
 
-                        query += &placeholder[0];
-                    }
+        let mut query = String::from("select ");
 
-                    query += " from ";
+        let select_count = placeholders.len();
+        for (i, (_, placeholder)) in placeholders.iter().enumerate() {
+            if i != 0 {
+                query += ", ";
+            }
 
-                    for i in 0..quad_count {
-                        if i != 0 {
-                            query += ", ";
-                        }
+            query += &placeholder[0];
+        }
 
-                        query += &format!("quad quad_{}", i);
-                    }
+        query += " from ";
 
-                    query += " where true ";
-                    for (a, b) in others {
-                        query += &format!("and {} = '{}' ", a, b.replace("'", "''"));
-                    }
+        for i in 0..quad_count {
+            if i != 0 {
+                query += ", ";
+            }
 
-                    for (_, placeholder) in placeholders {
-                        for (a, b) in placeholder.iter().zip(placeholder.iter().skip(1)) {
-                            query += &format!("and {} = {} ", a, b);
-                        }
-                    }
+            query += &format!("quad quad_{}", i);
+        }
 
-                    for (a, b) in checks {
-                        let against = store.cache.uri_to_id[&b];
+        query += " where true ";
+        for (a, b) in others {
+            query += &format!("and {} = '{}' ", a, b.replace("'", "''"));
+        }
 
-                        query += &format!("and {} = {} ", a, against);
-                    }
+        for (_, placeholder) in placeholders {
+            for (a, b) in placeholder.iter().zip(placeholder.iter().skip(1)) {
+                query += &format!("and {} = {} ", a, b);
+            }
+        }
 
-                    for (a, b) in checks_any {
-                        query += &format!(
-                            "and {} in ({}) ",
-                            a,
-                            b.into_iter()
-                                .map(|f| store.cache.uri_to_id[&f].to_string())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        );
-                    }
+        for (a, b) in checks {
+            let against = self.cache.uri_to_id[&b];
 
-                    // ok, query built. now send it off
-                    store.do_query(query, vec![])
-                })
-                .and_then(move |(result, store)| {
-                    let mut data = vec![];
-                    for row in result {
-                        let mut row_out = Vec::with_capacity(row.len());
-                        for i in 0..row.len() {
-                            row_out.push(row.get::<usize, i32>(i));
-                        }
+            query += &format!("and {} = {} ", a, against);
+        }
 
-                        data.push(row_out);
-                    }
+        for (a, b) in checks_any {
+            query += &format!(
+                "and {} in ({}) ",
+                a,
+                b.into_iter()
+                    .map(|f| self.cache.uri_to_id[&f].to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
 
-                    store
-                        .cache_ids(&data.iter().flatten().map(|f| *f).collect::<Vec<_>>())
-                        .map(|store| (data, store))
-                })
-                .map(move |(data, store)| {
-                    (
-                        data.into_iter()
-                            .map(|f| {
-                                f.into_iter()
-                                    .map(|f| store.cache.id_to_uri[&f].to_owned())
-                                    .collect()
-                            })
-                            .collect(),
-                        store,
-                    )
-                }),
-        )
+        // ok, query built. now send it off
+        let result = self.do_query(query, &[]).await?;
+
+        let mut data = vec![];
+        for row in result {
+            let mut row_out = Vec::with_capacity(select_count);
+            for i in 0..select_count {
+                row_out.push(row.get::<i32>(i)?.unwrap());
+            }
+
+            data.push(row_out);
+        }
+
+        self.cache_ids(&data.iter().flatten().map(|f| *f).collect::<Vec<_>>())
+            .await?;
+
+        Ok(data
+            .into_iter()
+            .map(|f| {
+                f.into_iter()
+                    .map(|f| self.cache.id_to_uri[&f].to_owned())
+                    .collect()
+            })
+            .collect())
     }
-
-    // -----
-
-    /// The `Future` that is returned when reading the collection data.
-    type ReadCollectionFuture =
-        Box<Future<Item = (CollectionPointer, Self), Error = (Error, Self)> + Send>;
 
     /// Reads N amount of items from the collection corresponding to a specific ID. If a cursor is passed,
     /// it can be used to paginate.
-    fn read_collection(
-        self,
+    async fn read_collection(
+        &mut self,
         path: String,
         count: Option<u32>,
         cursor: Option<String>,
-    ) -> Self::ReadCollectionFuture {
+    ) -> Result<CollectionPointer, StoreError> {
         let (until, offset) = match cursor {
             None => (true, i32::max_value()),
-            Some(ref value) if value.starts_with("before-") => match value[7..].parse::<i32>() {
-                Ok(val) => (false, val),
-                Err(e) => {
-                    return Box::new(future::ok((
-                        CollectionPointer {
-                            items: vec![],
-                            after: None,
-                            before: None,
-                            count: None,
-                        },
-                        self,
-                    )));
-                }
-            },
-            Some(ref value) if value.starts_with("after-") => match value[6..].parse::<i32>() {
-                Ok(val) => (true, val),
-                Err(e) => {
-                    return Box::new(future::ok((
-                        CollectionPointer {
-                            items: vec![],
-                            after: None,
-                            before: None,
-                            count: None,
-                        },
-                        self,
-                    )));
-                }
-            },
-
-            _ => {
-                return Box::new(future::ok((
-                    CollectionPointer {
-                        items: vec![],
-                        after: None,
-                        before: None,
-                        count: None,
-                    },
-                    self,
-                )));
-            }
+            Some(ref value) if value.starts_with("before-") => (false, value[7..].parse::<i32>()?),
+            Some(ref value) if value.starts_with("after-") => (true, value[6..].parse::<i32>()?),
+            _ => return Err("unknown collection cursor".into()),
         };
 
-        Box::new(
-            self.cache_uris(&[path.to_owned()])
-                .and_then(move |store| {
-                    let id = store.cache.uri_to_id[&path];
-                    store.select_collection(id, offset, count.unwrap_or(30) as i32, until)
-                })
-                .and_then(move |(items, store)| {
-                    let mut ids = Vec::new();
-                    for item in &items {
-                        ids.extend_from_slice(&[item.collection_id, item.object_id]);
-                    }
+        self.cache_uris(&[path.to_owned()]).await?;
+        let items = self
+            .select_collection(
+                self.cache.uri_to_id[&path],
+                offset,
+                count.unwrap_or(30) as i32,
+                until,
+            )
+            .await?;
 
-                    store.cache_ids(&ids).map(move |store| (items, store))
-                })
-                .map(move |(items, store)| {
-                    (
-                        CollectionPointer {
-                            items: items
-                                .iter()
-                                .map(|f| store.cache.id_to_uri[&f.object_id].to_owned())
-                                .collect(),
-                            after: items
-                                .iter()
-                                .last()
-                                .and_then(|f| f.id.checked_sub(1))
-                                .or(if !until { offset.checked_sub(1) } else { None })
-                                .map(|val| format!("after-{}", val)),
-                            before: items
-                                .iter()
-                                .next()
-                                .and_then(|f| f.id.checked_add(1))
-                                .or(if until { offset.checked_add(1) } else { None })
-                                .map(|val| format!("before-{}", val)),
-                            count: None,
-                        },
-                        store,
-                    )
-                }),
-        )
+        let mut all_ids = Vec::new();
+        for item in &items {
+            all_ids.extend_from_slice(&[item.collection_id, item.object_id]);
+        }
+
+        self.cache_ids(&all_ids).await?;
+
+        Ok(CollectionPointer {
+            items: items
+                .iter()
+                .map(|f| self.cache.id_to_uri[&f.object_id].to_owned())
+                .collect(),
+            after: items
+                .iter()
+                .last()
+                .and_then(|f| f.id.checked_sub(1))
+                .or(if !until { offset.checked_sub(1) } else { None })
+                .map(|var| format!("after-{}", var)),
+            before: items
+                .iter()
+                .next()
+                .and_then(|f| f.id.checked_add(1))
+                .or(if until { offset.checked_add(1) } else { None })
+                .map(|var| format!("before-{}", var)),
+            count: None,
+        })
     }
-
-    // -----
-
-    type FindCollectionFuture =
-        Box<Future<Item = (CollectionPointer, Self), Error = (Error, Self)> + Send>;
 
     /// Finds an item in a collection. The result will contain cursors to just before and after the item, if it exists.
-    fn find_collection(self, path: String, item: String) -> Self::FindCollectionFuture {
-        Box::new(
-            self.cache_uris(&[path.to_owned(), item.to_owned()])
-                .and_then(move |store| {
-                    let path_id = store.cache.uri_to_id[&path];
-                    let item_id = store.cache.uri_to_id[&item];
+    async fn find_collection(
+        &mut self,
+        path: String,
+        item: String,
+    ) -> Result<CollectionPointer, StoreError> {
+        self.cache_uris(&[path.to_owned(), item.to_owned()]).await?;
 
-                    store
-                        .collection_contains(path_id, item_id)
-                        .map(move |(exists, store)| (exists, store, item_id, item))
-                })
-                .map(move |(exists, store, item_id, item)| {
-                    if exists {
-                        (
-                            CollectionPointer {
-                                items: vec![item],
-                                after: item_id.checked_sub(1).map(|val| format!("after-{}", val)),
-                                before: item_id.checked_add(1).map(|val| format!("before-{}", val)),
-                                count: None,
-                            },
-                            store,
-                        )
-                    } else {
-                        (
-                            CollectionPointer {
-                                items: vec![],
-                                after: None,
-                                before: None,
-                                count: None,
-                            },
-                            store,
-                        )
-                    }
-                }),
-        )
+        let path_id = self.cache.uri_to_id[&path];
+        let item_id = self.cache.uri_to_id[&item];
+
+        if self.collection_contains(path_id, item_id).await? {
+            Ok(CollectionPointer {
+                items: vec![item],
+                after: item_id.checked_sub(1).map(|val| format!("after-{}", val)),
+                before: item_id.checked_add(1).map(|val| format!("before-{}", val)),
+                count: None,
+            })
+        } else {
+            Ok(CollectionPointer {
+                items: vec![],
+                after: None,
+                before: None,
+                count: None,
+            })
+        }
     }
-
-    // -----
-
-    /// The `Future` that is returned when writing into a collection.
-    type WriteCollectionFuture = Box<Future<Item = Self, Error = (Error, Self)> + Send>;
 
     /// Inserts an item into the back of the collection.
-    fn insert_collection(self, path: String, item: String) -> Self::WriteCollectionFuture {
-        Box::new(
-            self.cache_uris(&[path.to_owned(), item.to_owned()])
-                .and_then(move |store| {
-                    let path = store.cache.uri_to_id[&path];
-                    let item = store.cache.uri_to_id[&item];
-                    store.insert_collection(path, item)
-                }),
-        )
+    async fn insert_collection(&mut self, path: String, item: String) -> Result<(), StoreError> {
+        self.cache_uris(&[path.to_owned(), item.to_owned()]).await?;
+        let path = self.cache.uri_to_id[&path];
+        let item = self.cache.uri_to_id[&item];
+
+        self.insert_collection(path, item).await
     }
-
-    // -----
-
-    type ReadCollectionInverseFuture =
-        Box<Future<Item = (CollectionPointer, Self), Error = (Error, Self)> + Send>;
 
     /// Finds all the collections containing a specific object.
-    fn read_collection_inverse(self, item: String) -> Self::ReadCollectionInverseFuture {
-        Box::new(
-            self.cache_uris(&[item.to_owned()])
-                .and_then(move |store| {
-                    let id = store.cache.uri_to_id[&item];
-                    store.select_collection_inverse(id)
-                })
-                .and_then(move |(items, store)| {
-                    let mut ids = Vec::new();
-                    for item in &items {
-                        ids.extend_from_slice(&[item.collection_id]);
-                    }
+    async fn read_collection_inverse(
+        &mut self,
+        item: String,
+    ) -> Result<CollectionPointer, StoreError> {
+        self.cache_uris(&[item.to_owned()]).await?;
+        let id = self.cache.uri_to_id[&item];
+        let items = self.select_collection_inverse(id).await?;
 
-                    store.cache_ids(&ids).map(move |store| (items, store))
-                })
-                .map(move |(items, store)| {
-                    (
-                        CollectionPointer {
-                            items: items
-                                .iter()
-                                .map(|f| store.cache.id_to_uri[&f.collection_id].to_owned())
-                                .collect(),
-                            after: None,
-                            before: None,
-                            count: None,
-                        },
-                        store,
-                    )
-                }),
-        )
+        let mut ids = Vec::new();
+        for item in &items {
+            ids.extend_from_slice(&[item.collection_id]);
+        }
+
+        self.cache_ids(&ids).await?;
+
+        Ok(CollectionPointer {
+            items: items
+                .iter()
+                .map(|f| self.cache.id_to_uri[&f.collection_id].to_owned())
+                .collect(),
+            after: None,
+            before: None,
+            count: None,
+        })
     }
 
-    // -----
-
-    type RemoveCollectionFuture = Box<Future<Item = Self, Error = (Error, Self)> + Send>;
-
     /// Removes an item from the collection.
-    fn remove_collection(self, path: String, item: String) -> Self::RemoveCollectionFuture {
-        Box::new(
-            self.cache_uris(&[path.to_owned(), item.to_owned()])
-                .and_then(move |store| {
-                    let path = store.cache.uri_to_id[&path];
-                    let item = store.cache.uri_to_id[&item];
-                    store.delete_collection(path, item)
-                }),
-        )
+    async fn remove_collection(&mut self, path: String, item: String) -> Result<(), StoreError> {
+        self.cache_uris(&[path.to_owned(), item.to_owned()]).await?;
+
+        let path = self.cache.uri_to_id[&path];
+        let item = self.cache.uri_to_id[&item];
+        self.delete_collection(path, item).await
     }
 }

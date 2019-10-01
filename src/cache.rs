@@ -1,8 +1,8 @@
 use crate::{DatabaseQuad, DatabaseQuadContents};
 use jsonld::rdf::{QuadContents, StringQuad};
 use kroeg_tap::StoreItem;
+use postgres_async::Row;
 use std::collections::HashMap;
-use tokio_postgres::Row;
 
 #[derive(Debug)]
 pub struct EntityCache {
@@ -12,47 +12,10 @@ pub struct EntityCache {
     pub object: HashMap<String, StoreItem>,
 }
 
-/*
-
-pub enum DatabaseQuadContents {
-    Id(i32),
-    Object { contents: String, type_id: i32 },
-    LanguageString { contents: String, language: String },
-}
-
-pub struct DatabaseQuad {
-    pub id: i32,
-    pub quad_id: i32,
-    pub subject_id: i32,
-    pub predicate_id: i32,
-    pub contents: DatabaseQuadContents,
-}
-
-
-#[derive(Debug, Clone)]
-/// The contents of a single quad, which is either an ID reference or an Object.
-pub enum QuadContents {
-    /// An ID
-    Id(String),
-
-    /// An object, which consists of respectively a type, content, and optionally a language.
-    Object(String, String, Option<String>),
-}
-
-#[derive(Debug, Clone)]
-/// A single quad, consisting of a subject, predicate, and contents.
-pub struct StringQuad {
-    pub subject_id: String,
-    pub predicate_id: String,
-
-    pub contents: QuadContents,
-}
-*/
-
 impl EntityCache {
     pub fn cache_attribute_row(&mut self, row: Row) {
-        let id: i32 = row.get(0);
-        let uri: String = row.get(1);
+        let id: i32 = row.get(0).unwrap().unwrap();
+        let uri: String = row.get(1).unwrap().unwrap();
 
         self.id_to_uri.insert(id, uri.to_owned());
         self.uri_to_id.insert(uri, id);

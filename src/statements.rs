@@ -1,20 +1,19 @@
-use futures::{future, stream, Future, Stream};
-use tokio_postgres::{error::Error, Client, Statement};
+use postgres_async::{AnyError, FrontendReceiver, Statement};
 
-pub struct Statements {
-    pub upsert_attributes: Statement,
-    pub select_attributes: Statement,
-    pub select_quad: Statement,
-    pub insert_quads: Statement,
-    pub delete_quads: Statement,
-    pub insert_collection: Statement,
-    pub delete_collection: Statement,
-    pub select_collection: Statement,
-    pub select_collection_reverse: Statement,
-    pub select_collection_inverse: Statement,
-    pub find_collection: Statement,
-    pub queue_item_pop: Statement,
-    pub queue_item_put: Statement,
+pub struct Statements<'a> {
+    pub upsert_attributes: Statement<'a>,
+    pub select_attributes: Statement<'a>,
+    pub select_quad: Statement<'a>,
+    pub insert_quads: Statement<'a>,
+    pub delete_quads: Statement<'a>,
+    pub insert_collection: Statement<'a>,
+    pub delete_collection: Statement<'a>,
+    pub select_collection: Statement<'a>,
+    pub select_collection_reverse: Statement<'a>,
+    pub select_collection_inverse: Statement<'a>,
+    pub find_collection: Statement<'a>,
+    pub queue_item_pop: Statement<'a>,
+    pub queue_item_put: Statement<'a>,
 }
 
 const STATEMENTS: &[&'static str] = &[
@@ -58,35 +57,22 @@ const STATEMENTS: &[&'static str] = &[
     "insert into queue_item (event, data) values ($1, $2)"
 ];
 
-impl Statements {
-    pub fn make(mut conn: Client) -> impl Future<Item = (Statements, Client), Error = Error> {
-        let mut futures: Vec<_> = STATEMENTS.iter().map(|f| conn.prepare(f)).collect();
-        stream::iter_ok(futures)
-            .fold(vec![], |mut statements, item| {
-                item.map(|f| {
-                    statements.push(f);
-                    statements
-                })
-            })
-            .map(move |mut stmts| {
-                (
-                    Statements {
-                        upsert_attributes: stmts.remove(0),
-                        select_attributes: stmts.remove(0),
-                        select_quad: stmts.remove(0),
-                        insert_quads: stmts.remove(0),
-                        delete_quads: stmts.remove(0),
-                        insert_collection: stmts.remove(0),
-                        delete_collection: stmts.remove(0),
-                        select_collection: stmts.remove(0),
-                        select_collection_reverse: stmts.remove(0),
-                        select_collection_inverse: stmts.remove(0),
-                        find_collection: stmts.remove(0),
-                        queue_item_pop: stmts.remove(0),
-                        queue_item_put: stmts.remove(0),
-                    },
-                    conn,
-                )
-            })
+impl<'a> Statements<'a> {
+    pub async fn make(frontend: &impl FrontendReceiver<'a>) -> Result<Statements<'a>, AnyError> {
+        Ok(Statements {
+            upsert_attributes: Statement::parse(frontend, STATEMENTS[0]).await?,
+            select_attributes: Statement::parse(frontend, STATEMENTS[1]).await?,
+            select_quad: Statement::parse(frontend, STATEMENTS[2]).await?,
+            insert_quads: Statement::parse(frontend, STATEMENTS[3]).await?,
+            delete_quads: Statement::parse(frontend, STATEMENTS[4]).await?,
+            insert_collection: Statement::parse(frontend, STATEMENTS[5]).await?,
+            delete_collection: Statement::parse(frontend, STATEMENTS[6]).await?,
+            select_collection: Statement::parse(frontend, STATEMENTS[7]).await?,
+            select_collection_reverse: Statement::parse(frontend, STATEMENTS[8]).await?,
+            select_collection_inverse: Statement::parse(frontend, STATEMENTS[9]).await?,
+            find_collection: Statement::parse(frontend, STATEMENTS[10]).await?,
+            queue_item_pop: Statement::parse(frontend, STATEMENTS[11]).await?,
+            queue_item_put: Statement::parse(frontend, STATEMENTS[12]).await?,
+        })
     }
 }
