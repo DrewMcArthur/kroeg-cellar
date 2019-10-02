@@ -96,8 +96,8 @@ impl CollectionItem {
     fn make_from_row(row: &Row) -> CollectionItem {
         CollectionItem {
             id: row.get(0).unwrap().unwrap(),
-            collection_id: row.get(2).unwrap().unwrap(),
-            object_id: row.get(1).unwrap().unwrap(),
+            collection_id: row.get(1).unwrap().unwrap(),
+            object_id: row.get(2).unwrap().unwrap(),
         }
     }
 }
