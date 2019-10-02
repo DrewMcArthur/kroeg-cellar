@@ -341,6 +341,10 @@ impl<'a> CellarEntityStore<'a> {
             out.push(CollectionItem::make_from_row(&item));
         }
 
+        if !until {
+            out.reverse();
+        }
+
         Ok(out)
     }
 
