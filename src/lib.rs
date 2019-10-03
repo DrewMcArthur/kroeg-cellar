@@ -131,7 +131,7 @@ impl CellarConnection {
         let stream = TcpStream::connect(address).await?;
 
         let connection =
-            postgres_async::connect(stream, username.to_owned(), pass.to_owned(), db.to_owned())
+            postgres_async::connect(stream, db.to_owned(), username.to_owned(), pass.to_owned())
                 .await?;
         let statements = Statements::make(&connection).await?;
 
