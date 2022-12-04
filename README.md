@@ -23,11 +23,11 @@ This table maps an ID number to a URL, allowing for e.g. quick lookups and even
 
 ### `Quad`
 This table is slightly complicated, as it has to support everything that RDF
- can:
+ can do:
 
 - `id`: unique ID for the quad.
 - `quad_id`, `subject_id`, `predicate_id`: These point into the `Attribute`
-   table, fort the corresponding RDF quad attributes.
+   table, for the corresponding RDF quad attributes.
 
 - `attribute_id`: used if object points to another ID.
 
