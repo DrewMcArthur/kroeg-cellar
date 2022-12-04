@@ -8,7 +8,7 @@ Simple JSON-LD storage mechanism, storing everything in a database of RDF
 ## Usage
 
 This code is made mostly to work inside of Kroeg, but the external API is
- documented with rustdoc, which isn't publicly generated yet. Clone therepo
+ documented with rustdoc, which isn't publicly generated yet. Clone the repo,
  then run `cargo doc` to do it yourself.
 
 ## Design
