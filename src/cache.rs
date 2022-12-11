@@ -1,4 +1,4 @@
-use crate::{DatabaseQuad, DatabaseQuadContents};
+use crate::dbquad::{DatabaseQuad, DatabaseQuadContents};
 use jsonld::rdf::{QuadContents, StringQuad};
 use kroeg_tap::StoreItem;
 use postgres_async::types::Row;
