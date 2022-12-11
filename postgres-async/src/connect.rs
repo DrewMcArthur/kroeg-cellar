@@ -1,126 +1,63 @@
-use postgres_protocol::message::{backend, frontend};
-use std::collections::HashMap;
+use bytes::BytesMut;
+use futures::{lock::Mutex, AsyncRead, AsyncWrite};
 
-use crate::make_err;
+mod authentication;
+pub use authentication::*;
 
-pub type AnyError = Box<dyn std::error::Error + Send + Sync + 'static>;
+mod initialization;
+pub use initialization::*;
 
-pub struct Authentication {
-    pub username: String,
-    pub password: String,
+use crate::types::{AnyError, PostgresMessage};
+use crate::frontend::{Frontend, FrontendReceiver};
+
+/// A connection.
+pub struct Connection<'frontend> {
+    conn: Mutex<Box<dyn PostgresMessage + 'frontend>>,
 }
 
-impl Authentication {
-    pub fn on_message(
-        &mut self,
-        message: backend::Message,
-        buf: &mut Vec<u8>,
-    ) -> Result<bool, AnyError> {
-        use backend::Message::*;
-
-        match message {
-            AuthenticationOk => Ok(true),
-
-            AuthenticationKerberosV5 => Err("unsupported authentication method".into()),
-            AuthenticationCleartextPassword => {
-                frontend::password_message(self.password.as_bytes(), buf)?;
-
-                Ok(false)
-            }
-
-            AuthenticationMd5Password(body) => {
-                let hash = postgres_protocol::authentication::md5_hash(
-                    self.username.as_bytes(),
-                    self.password.as_bytes(),
-                    body.salt(),
-                );
-
-                frontend::password_message(hash.as_bytes(), buf)?;
-
-                Ok(false)
-            }
-
-            AuthenticationScmCredential => Err("unsupported authentication method".into()),
-            AuthenticationGssContinue(_) => Err("unsupported authentication method".into()),
-            AuthenticationSspi => Err("unsupported authentication method".into()),
-
-            AuthenticationSasl(_) | AuthenticationSaslContinue(_) | AuthenticationSaslFinal(_) => {
-                Err("unsupported authentication method".into())
-            }
-
-            ErrorResponse(data) => Err(make_err(data.fields()).into()),
-
-            _ => Err("unexpected message at this time".into()),
-        }
+impl<'frontend> FrontendReceiver<'frontend> for Connection<'frontend> {
+    fn connection(&self) -> &Mutex<Box<dyn PostgresMessage + 'frontend>> {
+        &self.conn
     }
 }
 
-pub struct Initialization {
-    pub key_data: Option<(i32, i32)>,
-    pub parameters: HashMap<String, String>,
-}
+pub async fn connect<'a, T: 'a + Send + Sync + AsyncRead + AsyncWrite + Unpin>(
+    stream: T,
+    database: String,
+    username: String,
+    password: String,
+) -> Result<Connection<'a>, AnyError> {
+    let mut conn = Frontend {
+        stream,
+        buf: BytesMut::with_capacity(1024),
+        notify_channel: None,
+        to_send: Vec::new(),
+        counter: 0,
+    };
 
-impl Initialization {
-    pub fn on_message(
-        &mut self,
-        message: backend::Message,
-        _: &mut Vec<u8>,
-    ) -> Result<bool, AnyError> {
-        use backend::Message::*;
+    let mut buf = Vec::new();
+    postgres_protocol::message::frontend::startup_message(
+        vec![("user", &username as &str), ("database", &database)],
+        &mut buf,
+    )?;
 
-        match message {
-            BackendKeyData(data) => {
-                self.key_data = Some((data.process_id(), data.secret_key()));
+    let mut init = InitializationState::Authenticating(Authentication {
+        username,
+        password,
+    });
+    loop {
+        if !buf.is_empty() {
+            conn.write_data(&buf).await?;
+            buf.drain(..);
+        }
 
-                Ok(false)
-            }
-
-            ParameterStatus(data) => {
-                self.parameters
-                    .insert(data.name()?.to_owned(), data.value()?.to_owned());
-
-                Ok(false)
-            }
-
-            ErrorResponse(data) => Err(make_err(data.fields()).into()),
-
-            NoticeResponse(_) => {
-                Ok(false)
-            }
-
-            ReadyForQuery(_) => Ok(true),
-
-            _ => Err("unexpected message at this time".into()),
+        let message = conn.read_message().await?;
+        if init.on_message(message, &mut buf)? {
+            break;
         }
     }
-}
 
-pub enum InitializationState {
-    Authenticating(Authentication),
-    Initializing(Initialization),
-}
+    let boxed = Mutex::new(Box::new(conn) as _);
 
-impl InitializationState {
-    pub fn on_message(
-        &mut self,
-        message: backend::Message,
-        buf: &mut Vec<u8>,
-    ) -> Result<bool, AnyError> {
-        match self {
-            InitializationState::Authenticating(auth) => {
-                if auth.on_message(message, buf)? {
-                    *self = InitializationState::Initializing(Initialization {
-                        key_data: None,
-                        parameters: HashMap::new(),
-                    });
-
-                    Ok(false)
-                } else {
-                    Ok(false)
-                }
-            }
-
-            InitializationState::Initializing(init) => init.on_message(message, buf),
-        }
-    }
+    Ok(Connection { conn: boxed })
 }

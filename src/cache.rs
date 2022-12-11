@@ -1,7 +1,7 @@
 use crate::{DatabaseQuad, DatabaseQuadContents};
 use jsonld::rdf::{QuadContents, StringQuad};
 use kroeg_tap::StoreItem;
-use postgres_async::Row;
+use postgres_async::types::Row;
 use std::collections::HashMap;
 
 #[derive(Debug)]

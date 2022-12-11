@@ -1,6 +1,7 @@
 use async_std::net::TcpStream;
 use jsonld::rdf::StringQuad;
-use postgres_async::{AnyError, Connection, Row};
+use postgres_async::{Connection};
+use postgres_async::types::{AnyError, Row};
 use std::collections::HashSet;
 use std::fmt;
 

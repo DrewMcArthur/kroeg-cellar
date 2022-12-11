@@ -1,5 +1,28 @@
-use crate::AnyError;
+use fallible_iterator::FallibleIterator;
+use postgres_protocol::message::backend;
+use postgres_protocol::message::backend::DataRowBody;
 use postgres_protocol::{types, IsNull, Oid};
+
+pub type AnyError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+#[async_trait::async_trait]
+pub trait PostgresMessage: Send + Sync {
+    fn register_next(&mut self, msg: &[u8]);
+    fn generate_name(&mut self) -> String;
+
+    async fn read_message(&mut self) -> Result<backend::Message, AnyError>;
+    async fn write_data(&mut self, buf: &[u8]) -> Result<(), AnyError>;
+}
+
+pub struct Row(pub DataRowBody);
+impl Row {
+    pub fn get<T: Deserializable>(&self, index: usize) -> Result<Option<T>, AnyError> {
+        match self.0.ranges().nth(index)?.unwrap() {
+            Some(range) => T::deserialize(&self.0.buffer()[range]).map(Some),
+            None => Ok(None),
+        }
+    }
+}
 
 pub trait Serializable: Send + Sync {
     fn serialize(&self, buf: &mut Vec<u8>) -> IsNull;
