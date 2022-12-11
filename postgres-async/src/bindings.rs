@@ -1,8 +1,8 @@
-use futures::lock::{MutexGuard};
+use futures::lock::MutexGuard;
 use postgres_protocol::message::backend;
 
-use crate::{Statement, FrontendReceiver, make_err};
 use crate::types::{AnyError, PostgresMessage, Row};
+use crate::{make_err, FrontendReceiver, Statement};
 
 #[allow(dead_code)]
 pub struct BoundStatement<'frontend: 'stmt, 'stmt> {

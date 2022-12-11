@@ -1,5 +1,7 @@
 use bytes::BytesMut;
-use futures::{channel::mpsc, lock::Mutex, AsyncRead, AsyncWrite, SinkExt, AsyncWriteExt, AsyncReadExt};
+use futures::{
+    channel::mpsc, lock::Mutex, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, SinkExt,
+};
 use postgres_protocol::message::backend;
 
 use crate::types::{AnyError, PostgresMessage};

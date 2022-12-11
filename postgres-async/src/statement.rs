@@ -1,10 +1,10 @@
 use std::marker::PhantomData;
 
 use futures::lock::Mutex;
-use postgres_protocol::message::{frontend, backend};
+use postgres_protocol::message::{backend, frontend};
 
-use crate::{FrontendReceiver, make_err, types, BoundStatement};
 use crate::types::{AnyError, PostgresMessage};
+use crate::{make_err, types, BoundStatement, FrontendReceiver};
 
 pub struct Statement<'frontend> {
     name: String,

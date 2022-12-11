@@ -9,9 +9,9 @@ mod statement;
 pub mod types;
 
 pub use bindings::{BoundQuery, BoundStatement};
-pub use connect::{Authentication, Connection, connect};
+pub use connect::{connect, Authentication, Connection};
 pub use frontend::{Frontend, FrontendReceiver};
-pub use statement::{Statement};
+pub use statement::Statement;
 
 fn make_err(errs: backend::ErrorFields) -> String {
     let mut err = String::new();

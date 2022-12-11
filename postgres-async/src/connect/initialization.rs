@@ -1,8 +1,8 @@
-use postgres_protocol::message::{backend};
+use postgres_protocol::message::backend;
 use std::collections::HashMap;
 
-use crate::{make_err, Authentication};
 use crate::types::AnyError;
+use crate::{make_err, Authentication};
 
 pub struct Initialization {
     pub key_data: Option<(i32, i32)>,
@@ -33,9 +33,7 @@ impl Initialization {
 
             ErrorResponse(data) => Err(make_err(data.fields()).into()),
 
-            NoticeResponse(_) => {
-                Ok(false)
-            }
+            NoticeResponse(_) => Ok(false),
 
             ReadyForQuery(_) => Ok(true),
 

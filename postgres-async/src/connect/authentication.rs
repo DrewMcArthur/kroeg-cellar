@@ -1,8 +1,7 @@
 use postgres_protocol::message::{backend, frontend};
 
-use crate::{make_err};
+use crate::make_err;
 use crate::types::AnyError;
-
 
 pub struct Authentication {
     pub username: String,

@@ -7,8 +7,8 @@ pub use authentication::*;
 mod initialization;
 pub use initialization::*;
 
-use crate::types::{AnyError, PostgresMessage};
 use crate::frontend::{Frontend, FrontendReceiver};
+use crate::types::{AnyError, PostgresMessage};
 
 /// A connection.
 pub struct Connection<'frontend> {
@@ -41,10 +41,7 @@ pub async fn connect<'a, T: 'a + Send + Sync + AsyncRead + AsyncWrite + Unpin>(
         &mut buf,
     )?;
 
-    let mut init = InitializationState::Authenticating(Authentication {
-        username,
-        password,
-    });
+    let mut init = InitializationState::Authenticating(Authentication { username, password });
     loop {
         if !buf.is_empty() {
             conn.write_data(&buf).await?;

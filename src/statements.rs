@@ -1,5 +1,5 @@
-use postgres_async::{FrontendReceiver, Statement};
 use postgres_async::types::AnyError;
+use postgres_async::{FrontendReceiver, Statement};
 
 pub struct Statements<'a> {
     pub upsert_attributes: Statement<'a>,
